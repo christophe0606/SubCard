@@ -37,6 +37,7 @@ From the checkout root:
 ./scripts/build.sh gpui
 ./scripts/run.sh swiftui
 ./scripts/run.sh gpui
+./scripts/test.sh
 ```
 
 `run.sh` builds the requested variant before launching it. On macOS, bundles are
@@ -71,3 +72,13 @@ Cargo builds use the checked-in lockfile with `--locked`. Review dependency lice
 changes when updating it; see [third-party notices](../THIRD_PARTY_NOTICES.md).
 Rust 1.98.1 currently reports future-compatibility warnings in upstream `block`
 0.1.6 and `proc-macro-error2` 2.0.1; the current build succeeds.
+
+SQLite is vendored in `vendor/sqlite` and built statically by SwiftPM/Cargo;
+no system SQLite development package is required. Its archive checksum and source
+provenance are recorded beside the source. SwiftPM's SDK warning settings may
+report narrowing conversions in the unmodified upstream amalgamation.
+
+`test.sh` builds a standalone C++ persistence test against the same SQLite source
+and runs it under `.build/tests/`. When app bundles exist on macOS, it also checks
+their runtime library paths against the OS directories. Manual menu/panel and
+cross-frontend checks are recorded in [SQLite documents](features/documents.md).

@@ -8,6 +8,8 @@ SubCard's own source is licensed under Apache-2.0; see `LICENSE`.
 | --- | --- | --- | --- |
 | GPUI | 0.2.2 | Apache-2.0 | https://github.com/zed-industries/zed/tree/main/crates/gpui |
 | cc (build-time only) | Locked in `apps/gpui/Cargo.lock` | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
+| SQLite | 3.54.1 | Public domain | https://www.sqlite.org/copyright.html |
+| unicode-segmentation | Locked in `apps/gpui/Cargo.lock` | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 
 GPUI is Copyright 2022 - 2025 Zed Industries, Inc. Its unmodified upstream license
 and copyright notice are included in `licenses/GPUI-LICENSE-APACHE`. That license
@@ -25,7 +27,12 @@ separately licensed MPL-2.0 crates `cbindgen` 0.28.0 (build-time), `dwrote` 0.11
 obligations when distributing them. This review covers declared package licenses;
 it is not a generated set of distribution notices.
 
-No third-party implementation files are copied into SubCard's source tree.
+`apps/gpui/src/text_input.rs` is adapted from GPUI 0.2.2's `examples/input.rs`;
+the source attribution and original Apache license are retained. The unmodified
+SQLite amalgamation/header are vendored under `vendor/sqlite`, retaining their
+original public-domain notices. Their archive checksum and provenance are
+recorded in `vendor/sqlite/README.md`. SQLite is statically linked into both apps.
+
 Cargo preserves upstream source archives, copyright notices, and license files
 under `.build/cargo-home/registry/`. The lockfile records exact dependency versions
 and source checksums. For packages offering alternative licenses, use the

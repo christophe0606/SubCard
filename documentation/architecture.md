@@ -15,10 +15,23 @@ compiled directly into each frontend's executable. SwiftPM handles the SwiftUI
 build; Cargo's portable `cc` build dependency handles the GPUI build. There is no
 copied backend implementation or manually maintained prebuilt library.
 
-The greeting API returns a non-null, null-terminated UTF-8 string with static
-lifetime. Neither caller modifies or frees it. Swift creates a `String`; Rust
-validates UTF-8 and copies into a GPUI `SharedString`. Rust's unsafe block is
-restricted to this documented FFI boundary. Both UIs display the returned value.
+The greeting API supplies the initial document text. The document C API exposes
+opaque owned handles, borrowed UTF-8 strings, and explicit operation results. The
+C++ core catches errors before they cross the language boundary. Rust wraps each
+handle in an owner with `Drop`; Swift keeps its owner within the main actor.
+
+## SQLite document layer (2026-10-17)
+
+`backend/src/Document.cpp` owns the document schema, text mutations, format
+validation, dirty tracking, and save semantics. An in-memory SQLite working copy
+separates editing from explicit saves. SQLite's backup API transfers the entire
+database, including resources and additional tables. The UIs own panels, menus,
+window titles, and confirmation flows, not persistence logic.
+
+`vendor/sqlite` contains the verified upstream amalgamation, compiled as a static
+library by both build systems. There is no external database service or SQLite
+runtime installation. See [SQLite documents](features/documents.md) for format,
+ownership rules, keyboard conventions, verification, and current limitations.
 
 ## Principles to preserve
 
@@ -42,9 +55,10 @@ frontend does not invoke a hardcoded compiler or linker. Windows will need nativ
 build/packaging helpers rather than the current Bash scripts.
 
 Both desktop frontends are verified on macOS. Linux and Windows are not tested.
-The SwiftUI source uses a `WindowGroup` and guards macOS-specific window sizing;
-it can be reused with the core in an iOS app. An iOS Xcode application target,
-signing, and simulator/device validation have not been added.
+The SwiftUI desktop scene uses a single `Window` and native AppKit document
+panels; iOS retains the bootstrap greeting scene. The shared core is portable,
+but an iOS document browser, signing, and simulator/device testing are not added.
 
-SQLite document stacks, cards, editing, and scripting remain future work. See the
-[hello-world feature](features/hello-world.md) for the implemented scope.
+SQLite documents and text editing are implemented. Card layout and scripting
+remain future work. The [hello-world feature](features/hello-world.md) records
+the original bootstrap.

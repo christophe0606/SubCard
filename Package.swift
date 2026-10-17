@@ -11,7 +11,21 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "SubCardSQLite",
+            path: "vendor/sqlite",
+            exclude: ["README.md"],
+            sources: ["src/sqlite3.c"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .define("SQLITE_THREADSAFE", to: "1"),
+                .define("SQLITE_OMIT_LOAD_EXTENSION"),
+                .define("SQLITE_DQS", to: "0"),
+                .define("SQLITE_TEMP_STORE", to: "3"),
+            ]
+        ),
+        .target(
             name: "SubCardCore",
+            dependencies: ["SubCardSQLite"],
             path: "backend",
             publicHeadersPath: "include"
         ),

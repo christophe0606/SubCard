@@ -2,6 +2,10 @@
 
 Implemented 2026-10-17.
 
+This records the original bootstrap. The current applications use the greeting
+as initial document text; the [SQLite documents feature](documents.md) adds file
+operations and replaces the centered greeting window with a small editor.
+
 ## Behavior
 
 Each frontend opens a resizable window titled **SubCard**, initially 640 by 400

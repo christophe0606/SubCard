@@ -24,6 +24,15 @@ bundle_macos() {
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>UTExportedTypeDeclarations</key><array><dict>
+        <key>UTTypeIdentifier</key><string>org.subcard.document</string>
+        <key>UTTypeDescription</key><string>SubCard Document</string>
+        <key>UTTypeConformsTo</key><array><string>public.database</string></array>
+        <key>UTTypeTagSpecification</key><dict>
+            <key>public.filename-extension</key><array><string>subcard</string></array>
+            <key>public.mime-type</key><string>application/vnd.subcard+sqlite3</string>
+        </dict>
+    </dict></array>
 </dict></plist>
 PLIST
     codesign --force --sign - "$bundle"

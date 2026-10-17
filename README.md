@@ -3,24 +3,30 @@
 A modern, multiplatform project inspired by HyperCard and science-fiction
 subspace.
 
-The bootstrap provides two desktop applications, one using **SwiftUI** and one
-using **GPUI**. Each opens a resizable **SubCard** window displaying **Hello World**,
-returned by the same C++ function. SQLite document stacks and card editing are
-planned; they are not implemented yet.
+Two desktop applications, using **SwiftUI** and **GPUI**, share a C++ document
+backend. Both create, open, edit, and save `.subcard` documents: single SQLite
+databases containing the document's data. SQLite is statically linked into both
+applications. Native macOS File menus provide New, Open, Save, and Save As;
+both save commands are dimmed while unchanged. Unsaved-change prompts protect
+edits on New/Open/Close/Quit. Keyboard shortcuts follow the target platform.
+
+The current editor is a small document-text field initialized with **Hello World**
+from C++. Full card editing and scripting are future work.
 
 ## Architecture overview
 
 ```text
 backend/                   Shared C++17 core with a C-compatible public API
+vendor/sqlite/             Verified SQLite source, statically compiled
 apps/swiftui/              SwiftUI frontend, built with SwiftPM
 apps/gpui/                 Rust + GPUI frontend, built with Cargo
 scripts/                   Build and launch helpers
 documentation/            Architecture, features, and development details
 ```
 
-Both frontends compile the same C++ backend. Swift imports its public header
-through a Clang module; Rust calls it through C FFI. Shared application logic and
-future document storage belong in C++; windowing and presentation belong in the
+Both frontends compile the same C++ backend and SQLite source. Swift imports the
+core's public header through a Clang module; Rust calls it through C FFI. Shared
+application logic and document storage live in C++; windowing and presentation belong in the
 frontends. GPUI is intended for macOS/Linux and later Windows; SwiftUI is intended
 for macOS/iOS. Both desktop versions are currently verified on macOS only.
 
@@ -43,6 +49,7 @@ produce `.build/apps/swiftui/SubCard.app` and `.build/apps/gpui/SubCard.app`.
 - [Architecture and principles](documentation/architecture.md)
 - [Development, prerequisites, build storage, and platform scope](documentation/development.md)
 - [Hello World feature and verification](documentation/features/hello-world.md)
+- [SQLite documents, menus, shortcuts, format, and verification](documentation/features/documents.md)
 
 Document new features and architecture decisions in `documentation/` and link
 them here so the project retains its implementation history and principles.
