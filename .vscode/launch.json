@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SubCard}",
+            "name": "Debug SubCard",
+            "target": "SubCard",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SubCard"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SubCard}",
+            "name": "Release SubCard",
+            "target": "SubCard",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SubCard"
+        }
+    ]
+}
