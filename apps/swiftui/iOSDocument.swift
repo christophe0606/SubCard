@@ -257,7 +257,7 @@ struct PhoneDocumentView: View {
                 ERCanvasEditor(document: store.document, changed: store.refresh,
                     registerEditor: { store.finishEREditing = $0 }, draftChanged: { [weak store] in store?.erDraftChanged($0) }).disabled(store.busy)
             }
-            .navigationTitle("SubCard")
+            .navigationTitle(store.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

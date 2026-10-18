@@ -6,9 +6,11 @@ subspace.
 Two desktop applications, using **SwiftUI** and **GPUI**, share a C++ document
 backend. Both create, open, edit, and save `.subcard` documents: single SQLite
 databases containing the document's data. SQLite is statically linked into both
-applications. Native macOS File menus provide New, Open, Save, and Save As;
-both save commands are dimmed while unchanged. Unsaved-change prompts protect
-edits on New/Open/Close/Quit. Keyboard shortcuts follow the target platform.
+applications. Native macOS File/Edit menus act on the focused document window.
+Each window owns independent editor state. Its title and edited indicator show
+document identity and unsaved changes, and both save commands are dimmed while
+unchanged. New/Open preserve existing windows; Close/Quit protect unsaved edits.
+Keyboard shortcuts follow the target platform.
 
 A native **iPhone app for iOS 16 and later** uses the same backend and document
 format, with a mobile editor and Files-based Open/Save controls. Its build,
@@ -22,8 +24,14 @@ are hidden and generated automatically. Edit table names and colors in the
 inspector, and choose cascade/block deletion for one-to-many relationships. Pan, zoom, fit, calibrated 100% scale,
 clipboard duplication and undo/redo are supported. Adding a table smoothly pans the canvas to reveal it. Diagram layout and viewport
 are saved inside the document. Mac uses a resizable inspector; iPhone uses a
-separate details screen. Full card editing, ordinary data fields and scripting
-are future work.
+separate details screen. The inspector supports **string, URL, date, time,
+date-time, binary coded decimal (BCD), float, integer, boolean and blob fields**,
+with **Allow NULL** and **Unique values** rules for every field, plus optional
+lookup indexes for suitable types. SQLite enforces required and unique values.
+Blobs can represent
+images (such as contact photos), videos, sounds or documents. Fields appear only
+in the inspector: the canvas represents tables and relationships. Full card/data
+entry, attachment import/playback and scripting remain future work.
 
 Each document separates application-owned system tables from its user-defined
 entity/relationship schema. User data has one global state across **all user
@@ -89,6 +97,7 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 
 ## Documentation
 
+- [Typed fields, indexes, exact decimals and blob purposes](documentation/features/typed-fields.md)
 - [Entity relationship canvas, command architecture, design decisions, and tests](documentation/features/entity-relationship-canvas.md)
 - [Architecture and principles](documentation/architecture.md)
 - [Document lifecycle, global data states, modes, and schema locking](documentation/features/document-lifecycle.md)

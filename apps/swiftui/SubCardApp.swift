@@ -30,6 +30,7 @@ extension UTType {
 
 @MainActor
 final class DocumentStore: ObservableObject {
+    static let openDocuments = NSHashTable<DocumentStore>.weakObjects()
     @Published private(set) var text = ""
     @Published private(set) var changed = false
     @Published private(set) var usingDocument = false
@@ -110,6 +111,7 @@ final class DocumentStore: ObservableObject {
     func confirmReplacement() -> Bool {
         finishEREditing(false)
         guard changed else { return true }
+        window?.makeKeyAndOrderFront(nil)
         let alert = NSAlert()
         alert.messageText = "Do you want to save the changes to “\(name)”?"
         alert.informativeText = "Your changes will be lost if you don’t save them."
@@ -155,14 +157,14 @@ final class DocumentStore: ObservableObject {
 
     func attach(_ window: NSWindow) {
         self.window = window
+        Self.openDocuments.add(self)
         refresh()
     }
 
     func windowClosed() {
+        finishEREditing(true)
         window = nil
-        // Closing ends this document's lifetime, including Don't Save. Keep a
-        // clean model for the next New command while macOS keeps the app open.
-        if let next = subcard_document_new() { finishEREditing(true); owner = CoreDocument(next); refresh() }
+        Self.openDocuments.remove(self)
     }
 }
 
@@ -175,9 +177,11 @@ private final class CoreDocument {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let document = DocumentStore()
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Self.document.confirmReplacement() ? .terminateNow : .terminateCancel
+        for document in DocumentStore.openDocuments.allObjects {
+            if !document.confirmReplacement() { return .terminateCancel }
+        }
+        return .terminateNow
     }
 }
 
@@ -214,56 +218,83 @@ private struct WindowObserver: NSViewRepresentable {
 }
 
 private struct DocumentCommands: Commands {
-    @ObservedObject var store: DocumentStore
+    @FocusedObject private var store: DocumentStore?
     @Environment(\.openWindow) private var openWindow
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New") { if store.newDocument() { openWindow(id: "document") } }
+            Button("New") { openWindow(id: "document", value: DesktopDocumentRequest()) }
                 .keyboardShortcut("n", modifiers: .command)
-            Button("Open…") { if store.openDocument() { openWindow(id: "document") } }
+            Button("Open…") {
+                let panel = NSOpenPanel()
+                panel.title = "Open SubCard Document"
+                panel.allowedContentTypes = [.subcard]
+                panel.allowsMultipleSelection = true
+                if panel.runModal() == .OK {
+                    for url in panel.urls { openWindow(id: "document", value: DesktopDocumentRequest(url: url)) }
+                }
+            }
                 .keyboardShortcut("o", modifiers: .command)
             Divider()
-            Button("Close") { store.window?.performClose(nil) }
+            Button("Close") { store?.window?.performClose(nil) }
                 .keyboardShortcut("w", modifiers: .command)
+        }
+        CommandGroup(before: .toolbar) {
+            Button(store?.usingDocument == true ? "Edit document" : "Use document") { store?.toggleMode() }
+                .disabled(store == nil)
+            Divider()
         }
         CommandGroup(replacing: .saveItem) {
             Divider()
-            Button("Save") { store.save() }
+            Button("Save") { store?.save() }
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(!store.changed)
-            Button("Save As…") { store.save(as: true) }
+                .disabled(store?.changed != true)
+            Button("Save As…") { store?.save(as: true) }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(!store.changed)
+                .disabled(store?.changed != true)
         }
+    }
+}
+
+private struct DesktopDocumentRequest: Codable, Hashable {
+    var id = UUID()
+    var url: URL?
+}
+
+private struct DesktopDocumentView: View {
+    let request: DesktopDocumentRequest
+    @StateObject private var store = DocumentStore()
+    @State private var loaded = false
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        ERCanvasEditor(document: store.document, changed: store.refresh,
+            registerEditor: { store.finishEREditing = $0 }, draftChanged: { [weak store] in store?.erDraftChanged($0) })
+            .frame(minWidth: 720, minHeight: 480)
+            .background(WindowObserver(store: store))
+            .focusedSceneObject(store)
+            .onAppear {
+                if !loaded {
+                    loaded = true
+                    if let url = request.url { store.openDocument(at: url) }
+                }
+            }
+            .onOpenURL { url in
+                openWindow(id: "document", value: DesktopDocumentRequest(url: url))
+            }
     }
 }
 
 @main
 struct SubCardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var store = AppDelegate.document
-    @FocusState private var editorIsFocused: Bool
     var body: some Scene {
-        Window("SubCard", id: "document") {
-            VStack(spacing: 0) {
-                HStack {
-                    Text(store.name).font(.headline)
-                    Text(store.changed ? "Edited" : "Saved").foregroundStyle(.secondary)
-                    Spacer()
-                    DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
-                }.padding(12)
-                Divider()
-                ERCanvasEditor(document: store.document, changed: store.refresh,
-                    registerEditor: { store.finishEREditing = $0 }, draftChanged: { [weak store] in store?.erDraftChanged($0) })
-            }
-            .frame(minWidth: 720, minHeight: 480)
-            .background(WindowObserver(store: store))
-            .onOpenURL { store.openDocument(at: $0) }
-        }
+        WindowGroup("SubCard", id: "document", for: DesktopDocumentRequest.self) { request in
+            DesktopDocumentView(request: request.wrappedValue)
+        } defaultValue: { DesktopDocumentRequest() }
         .defaultSize(width: 1180, height: 760)
-        .commands { DocumentCommands(store: store); ERCommands() }
+        .commands { DocumentCommands(); ERCommands() }
     }
 }
+
 #else
 @main
 struct SubCardApp: App {

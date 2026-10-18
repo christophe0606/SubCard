@@ -8,6 +8,9 @@ enum EditorTests {
   static func main() async {
     await animatedReveal()
     newTableVisibility()
+    typedFields()
+    tableTapNavigation()
+    independentDocuments()
     let document = subcard_document_new()!
     defer { subcard_document_close(document) }
     let store = ERStore()
@@ -78,6 +81,154 @@ enum EditorTests {
     store.document = nil
     store.commitNames()
     print("Editor name commits, table relationships, cardinality, selection and undo passed.")
+  }
+  static func independentDocuments() {
+    let firstDocument = subcard_document_new()!
+    let secondDocument = subcard_document_new()!
+    defer {
+      subcard_document_close(firstDocument)
+      subcard_document_close(secondDocument)
+    }
+    let first = ERStore(), second = ERStore()
+    first.attach(firstDocument, changed: {})
+    second.attach(secondDocument, changed: {})
+    first.addTable()
+    first.tableNameDraft = "First document"
+    second.addTable()
+    second.tableNameDraft = "Second document"
+    second.duplicate()
+    assert(first.tableNameDraft == "First document" && first.hasDraft)
+    assert(first.graph.tables.count == 1 && second.graph.tables.count == 2)
+    first.commitNames()
+    assert(first.table?.name == "First document")
+    assert(second.table?.name == "Second document copy")
+    let secondSnapshot = String(cString: subcard_document_er_json(secondDocument)!)
+    first.command("undo")
+    assert(first.table?.name == "Table 1")
+    assert(String(cString: subcard_document_er_json(secondDocument)!) == secondSnapshot)
+    first.deleteSelection()
+    assert(first.graph.tables.isEmpty && second.graph.tables.count == 2)
+    first.document = nil
+    second.document = nil
+    print("Independent document drafts, selections, mutations and undo histories passed.")
+  }
+  static func tableTapNavigation() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.addTable()
+    let first = store.table!.id
+    store.addTable()
+    let second = store.table!.id
+    let before = String(cString: subcard_document_er_json(document)!)
+    store.selectTableFromCanvas(first, tapCount: 1, compact: true)
+    assert(store.selectedTable == first && !store.showDetails)
+    store.selectTableFromCanvas(first, tapCount: 1, compact: true)
+    assert(!store.showDetails) // A later single tap is still selection only.
+    store.selectTableFromCanvas(first, tapCount: 2, compact: true)
+    assert(store.selectedTable == first && store.showDetails)
+    store.showDetails = false // Return from the iPhone details screen.
+    store.selectTableFromCanvas(second, tapCount: 1, compact: true)
+    assert(store.selectedTable == second && !store.showDetails)
+    store.selectTableFromCanvas(first, tapCount: 1, compact: false)
+    assert(store.table?.id == first && !store.showDetails) // Adjacent desktop inspector.
+    assert(String(cString: subcard_document_er_json(document)!) == before)
+    // Navigation commits an existing inspector draft to its original table.
+    store.tableNameDraft = "People"
+    store.selectTableFromCanvas(second, tapCount: 1, compact: true)
+    assert(store.graph.tables.first?.name == "People" && store.table?.id == second && !store.hasDraft)
+    assert(subcard_document_set_mode(document, SUBCARD_MODE_USE) != 0)
+    store.refresh()
+    store.selectTableFromCanvas(first, tapCount: 1, compact: true)
+    assert(store.table?.id == first && !store.showDetails)
+    store.selectTableFromCanvas(first, tapCount: 2, compact: true)
+    assert(store.showDetails) // Read-only tables use the same selection/navigation policy.
+    store.document = nil
+    print("Compact single/double taps, desktop selection, use-mode selection and draft ownership passed.")
+  }
+  static func typedFields() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.addTable()
+    let tableID = store.table!.id
+    for type in ERDatatype.allCases {
+      store.addField(type)
+      assert(store.field?.kind == type.rawValue)
+      assert(store.table?.height == 64)  // The canvas stays table/relationship only.
+    }
+    assert(store.table?.dataFields.count == 10 && store.graph.edges.isEmpty)
+    let photo = store.field!
+    store.fieldNameDraft = "Portrait"
+    assert(store.hasDraft)
+    store.updateField(photo, ["media": "image"])
+    assert(store.field?.name == "Portrait" && store.field?.media == "image" && !store.hasDraft)
+    store.command("undo")
+    assert(store.field?.name == "Portrait" && store.field?.media == "binary")
+    store.command("undo")
+    assert(store.field?.name == photo.name && store.fieldNameDraft == photo.name)
+    store.command("redo")
+    store.command("redo")
+    store.selectField(store.table!.dataFields.first!.id)
+    store.fieldNameDraft = "Full name"
+    store.selectField(photo.id)
+    assert(store.table?.dataFields.first?.name == "Full name")
+    store.fieldNameDraft = "Photo"
+    store.tableNameDraft = "People"
+    store.commitNames()  // The same lifecycle hook handles both draft owners.
+    assert(store.table?.name == "People" && store.field?.name == "Photo" && !store.hasDraft)
+    store.fieldNameDraft = ""
+    store.commitNames()
+    assert(store.error != nil && store.fieldNameDraft == "Photo" && !store.hasDraft)
+    store.error = nil
+    store.fieldNameDraft = "Saved photo"
+    store.commitNames()
+    let path = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!)
+      .appendingPathComponent("typed-editor-\(UUID().uuidString).subcard")
+    defer { try? FileManager.default.removeItem(at: path) }
+    assert(subcard_document_save(document, path.path) != 0)
+    let reopened = subcard_document_open(path.path)!
+    let other = ERStore()
+    other.attach(reopened, changed: {})
+    other.select(table: tableID)
+    assert(other.table?.height == 64 && other.table?.dataFields.count == 10)
+    assert(
+      other.table?.dataFields.last?.name == "Saved photo"
+        && other.table?.dataFields.last?.media == "image")
+    other.document = nil
+    subcard_document_close(reopened)
+    store.command("delete_field", ["table": tableID, "id": photo.id])
+    assert(store.selectedField == nil && store.fieldNameDraft.isEmpty)
+    store.command("undo")
+    store.selectField(photo.id)
+    assert(store.field?.media == "image")
+    let url = store.table!.dataFields.first { $0.kind == "url" }!
+    store.selectField(url.id)
+    store.fieldNameDraft = "Homepage"
+    store.updateField(url, ["nullable": false, "unique": true])
+    assert(
+      store.field?.name == "Homepage" && store.field?.nullable == false && store.field?.unique == true
+    )
+    store.command("undo")
+    assert(store.field?.nullable == true && store.field?.unique == false)
+    store.command("redo")
+    store.updateField(url, ["kind": "blob"])
+    assert(store.field?.indexed == false && store.field?.unique == true && store.field?.nullable == false)
+    store.select(table: tableID)
+    assert(store.selectedField == nil && store.fieldNameDraft.isEmpty)
+    store.duplicate()
+    assert(store.table?.dataFields.count == 10 && store.table?.height == 64)
+    assert(store.table?.dataFields.last?.media == "image" && store.graph.edges.isEmpty)
+    let copiedURL = store.table!.dataFields.first { $0.name == "Homepage" }!
+    assert(copiedURL.unique && !copiedURL.nullable && copiedURL.kind == "blob")
+    // Legacy generated keys remain hidden from the field list.
+    store.command("add_index", ["table": store.table!.id, "name": "hidden", "kind": "index"])
+    assert(store.table?.fields.count == 11 && store.table?.dataFields.count == 10)
+    store.document = nil
+    print(
+      "Typed inspector fields, draft ownership, fixed canvas height, copy and persistence passed.")
   }
   static func animatedReveal() async {
     let document = subcard_document_new()!

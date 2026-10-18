@@ -34,7 +34,7 @@ one B (1:1)** or **A has many B (1:N)**. The arrow direction describes the user'
 model. It does not describe the direction of a SQL reference.
 
 Create an arrow by dragging a table's right circle onto another table (including
-its left circle), or select a table, choose **Relationship / Create relationship**,
+its left circle), or select a table, choose **Relationship** on the canvas toolbar,
 and click/tap the destination. Tapping the right circle also arms the source for
 a subsequent destination tap, including on iPhone. Cancel abandons the pending
 arrow without creating a field or consuming an undo step. New arrows default
@@ -108,7 +108,9 @@ opens a separate detail screen and returns to the canvas without losing layout.
 ## iPhone interaction refinements
 
 Adding, pasting or duplicating a table selects it on the canvas without pushing
-its details screen. Tap a table header, field, or arrow when you want to edit details.
+its details screen. On iPhone, a single tap selects a table and a double tap opens
+its details. On desktop, a single click selects it and updates the adjacent
+inspector. Tapping an arrow opens its relationship details.
 **Table** also reveals the newly created table by panning the canvas at the current
 zoom and calibration. The entire table is brought inside a 24-point margin when
 it fits; at larger scales the leading edge/header remains visible. The actual
@@ -387,3 +389,51 @@ confirmed the paired wired connection and developer services. The latest app was
 rebuilt, development-signed, verified for iOS 16.0 and installed successfully on
 the iPhone 12 Pro Max using `run-iphone.sh --no-launch`. The user will open it
 manually to test the table-only connection details and animated table reveal.
+
+## Typed fields in the inspector (2026-10-18)
+
+Ordinary fields are edited exclusively in the details pane. The canvas remains a
+table/relationship diagram with fixed-height table headers. See
+[Typed fields](typed-fields.md) for the version-3 commands, datatypes, constraints,
+optional indexing, blob purposes and verification. Version-1/2 legacy keys remain
+hidden; relationships still generate their references and indexes automatically.
+
+## Simplified table nodes (2026-10-18)
+
+Both frontends draw tables as a single solid-color rounded rectangle with a
+selection outline. The old header/body treatment and white bottom strip have
+been removed. Table geometry, text, ports, drag targets and relationships retain
+their existing behavior. Fields remain exclusively in the inspector.
+
+Relationship creation is available through the canvas toolbar or by dragging
+between table ports. The redundant Create relationship button and its helper
+text have been removed from the inspector; relationship property editing remains
+in the inspector when an arrow is selected.
+
+Verification: native SwiftUI and GPUI checks confirm the solid rounded shape,
+selection outline and canvas relationship control, with no duplicate inspector
+button. Both Mac builds and the existing regression suites pass. The update was
+development-signed, verified for iOS 16 and installed on the paired iPhone with
+`--no-launch` for manual testing.
+
+## iPhone table selection and activation (2026-10-18)
+
+A single tap selects a table on iPhone and leaves the canvas visible. A double
+tap opens the selected table's details screen. Desktop single-click selection
+continues to update the side-by-side inspector. The same iPhone policy applies
+in editing and use modes. Separate single taps on an already-selected table do
+not open details.
+
+The UIKit canvas forwards the native touch tap count to the existing end-of-drag
+handler. There is no delayed single-tap recognizer; selection remains immediate.
+Movement, pinch cancellation and pending relationship gestures keep their
+existing handling. The frontend store owns selection/navigation, and taps do not
+change the document or consume undo history. The Swift editor suite exercises
+compact single/double taps, desktop selection, use-mode selection and draft
+commit ownership. Physical touch acceptance remains for the iPhone test.
+
+Verification: the full backend/Swift editor suite and Mac SwiftUI build pass. A
+native Mac check confirms a single click updates the adjacent inspector. The
+updated signed iOS 16 app was installed on the paired iPhone with `--no-launch`
+for physical single/double-tap acceptance testing. The desktop test instance was
+quit after verification.

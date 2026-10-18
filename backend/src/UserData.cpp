@@ -95,7 +95,7 @@ int authorize(void* context, int action, const char* first, const char* second,
         return user_name(first) || (schema && first && std::strcmp(first, "sqlite_master") == 0) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_SELECT: case SQLITE_RECURSIVE: return SQLITE_OK;
     case SQLITE_FUNCTION:
-        for (const char* name : {"abs", "coalesce", "ifnull", "length", "lower", "upper", "min", "max", "count", "sum"})
+        for (const char* name : {"abs", "coalesce", "ifnull", "length", "lower", "upper", "min", "max", "count", "sum", "date", "substr", "hex", "glob", "instr", "char"})
             if (second && sqlite3_stricmp(name, second) == 0) return SQLITE_OK;
         return SQLITE_DENY;
     default: return SQLITE_DENY;

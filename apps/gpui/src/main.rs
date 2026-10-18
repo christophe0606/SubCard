@@ -16,6 +16,9 @@ actions!(
         OpenDocument,
         Save,
         SaveAs,
+        Duplicate,
+        EditDocument,
+        UseDocument,
         Close,
         Quit,
         ConfirmQuit,
@@ -28,7 +31,7 @@ actions!(
     ]
 );
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Intent {
     New,
     Open,
@@ -39,14 +42,13 @@ enum Intent {
 struct SubCardView {
     document: Document,
     busy: bool,
-    file_menu: bool,
+    active_menu: Option<&'static str>,
     error: Option<String>,
     er: er::ERState,
 }
 
 impl SubCardView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let document = Document::new().expect("Cannot create the initial SQLite document");
+    fn new(document: Document, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let entity = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             entity
@@ -67,21 +69,26 @@ impl SubCardView {
             er,
             document,
             busy: false,
-            file_menu: false,
+            active_menu: None,
             error: None,
         }
     }
 
     fn request(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
+            if intent == Intent::Quit {
+                cancel_quit(cx);
+            }
             return;
         }
         self.er_commit_names(cx);
-        self.file_menu = false;
-        if !self.document.changed() {
+        self.active_menu = None;
+        if matches!(intent, Intent::New | Intent::Open) || !self.document.changed() {
             self.perform(intent, window, cx);
             return;
         }
+        // Quit also visits background documents: their sheets must be visible.
+        window.activate_window();
         self.busy = true;
         let answer = window.prompt(
             PromptLevel::Warning,
@@ -97,7 +104,12 @@ impl SubCardView {
                 match answer {
                     0 => this.save(false, Some(intent), window, cx),
                     2 => this.perform(intent, window, cx),
-                    _ => cx.notify(),
+                    _ => {
+                        if intent == Intent::Quit {
+                            cancel_quit(cx);
+                        }
+                        cx.notify();
+                    }
                 }
             })
             .ok();
@@ -106,33 +118,14 @@ impl SubCardView {
         cx.notify();
     }
 
-    fn replace(
-        &mut self,
-        result: Result<Document, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match result {
-            Ok(document) => {
-                self.document = document;
-                self.er = er::ERState::new(window, cx);
-                self.er_refresh();
-                self.error = None;
-                window.focus(&self.er.focus);
-            }
-            Err(error) => self.show_error(error, window, cx),
-        }
-        cx.notify();
-    }
-
     fn perform(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
-            Intent::New => self.replace(Document::new(), window, cx),
+            Intent::New => match Document::new().and_then(|doc| open_document_window(doc, cx)) {
+                Ok(()) => {}
+                Err(e) => self.show_error(e, window, cx),
+            },
             Intent::Close => window.remove_window(),
-            Intent::Quit => {
-                lifecycle::allow_exit();
-                cx.quit();
-            }
+            Intent::Quit => cx.defer(continue_quit),
             Intent::Open => {
                 self.busy = true;
                 let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -148,7 +141,11 @@ impl SubCardView {
                         match paths {
                             Ok(Ok(Some(paths))) => {
                                 if let Some(path) = paths.first() {
-                                    this.replace(Document::open(path), window, cx);
+                                    if let Err(e) = Document::open(path)
+                                        .and_then(|doc| open_document_window(doc, cx))
+                                    {
+                                        this.show_error(e, window, cx);
+                                    }
                                 }
                             }
                             Ok(Err(error)) => this.show_error(error.to_string(), window, cx),
@@ -193,7 +190,12 @@ impl SubCardView {
                     self.perform(intent, window, cx);
                 }
             }
-            Err(error) => self.show_error(error, window, cx),
+            Err(error) => {
+                if after == Some(Intent::Quit) {
+                    cancel_quit(cx);
+                }
+                self.show_error(error, window, cx);
+            }
         }
         cx.notify();
     }
@@ -209,7 +211,7 @@ impl SubCardView {
         if self.busy || !self.document.changed() {
             return;
         }
-        self.file_menu = false;
+        self.active_menu = None;
         if !save_as && let Some(path) = self.document.path() {
             self.save_to(path, after, window, cx);
             return;
@@ -232,8 +234,17 @@ impl SubCardView {
                 this.busy = false;
                 match path {
                     Ok(Ok(Some(path))) => this.save_to(path, after, window, cx),
-                    Ok(Err(error)) => this.show_error(error.to_string(), window, cx),
-                    _ => {}
+                    Ok(Err(error)) => {
+                        if after == Some(Intent::Quit) {
+                            cancel_quit(cx);
+                        }
+                        this.show_error(error.to_string(), window, cx);
+                    }
+                    _ => {
+                        if after == Some(Intent::Quit) {
+                            cancel_quit(cx);
+                        }
+                    }
                 }
                 cx.notify();
             })
@@ -241,6 +252,91 @@ impl SubCardView {
         })
         .detach();
         cx.notify();
+    }
+    fn toggle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.er_commit_names(cx);
+        if let Err(e) = self.document.toggle_mode() {
+            self.show_error(e, window, cx);
+        }
+        self.active_menu = None;
+        window.focus(&self.er.focus);
+        cx.notify();
+    }
+    // Platforms without a native global menubar use an application menubar,
+    // separate from the canvas toolbar, with the same action/focus validation.
+    fn desktop_menu_item<A: Action + Clone>(
+        &self,
+        title: &'static str,
+        action: A,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let enabled = !self.busy && window.is_action_available(&action, cx);
+        div()
+            .id(title)
+            .px_3()
+            .py_1()
+            .child(title)
+            .when(!enabled, |d| d.opacity(0.4))
+            .on_click(cx.listener(move |s, _, w, cx| {
+                if enabled {
+                    s.active_menu = None;
+                    w.dispatch_action(Box::new(action.clone()), cx);
+                    cx.notify();
+                }
+            }))
+    }
+    fn desktop_menu_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut headings = div().flex().gap_3().p_2();
+        for title in ["File", "Edit", "View"] {
+            headings = headings.child(div().id(title).child(title).cursor_pointer().on_click(
+                cx.listener(move |s, _, _, cx| {
+                    s.active_menu = if s.active_menu == Some(title) {
+                        None
+                    } else {
+                        Some(title)
+                    };
+                    cx.notify();
+                }),
+            ));
+        }
+        let mut bar = div().flex().flex_col().child(headings);
+        let mut items = div().flex().flex_col().bg(white()).border_b_1().py_1();
+        match self.active_menu {
+            Some("File") => {
+                items = items
+                    .child(self.desktop_menu_item("New", NewDocument, window, cx))
+                    .child(self.desktop_menu_item("Open…", OpenDocument, window, cx))
+                    .child(self.desktop_menu_item("Save", Save, window, cx))
+                    .child(self.desktop_menu_item("Save As…", SaveAs, window, cx))
+                    .child(self.desktop_menu_item("Close", Close, window, cx));
+            }
+            Some("Edit") => {
+                items = items
+                    .child(self.desktop_menu_item("Undo", Undo, window, cx))
+                    .child(self.desktop_menu_item("Redo", Redo, window, cx))
+                    .child(self.desktop_menu_item("Cut", Cut, window, cx))
+                    .child(self.desktop_menu_item("Copy", Copy, window, cx))
+                    .child(self.desktop_menu_item("Paste", Paste, window, cx))
+                    .child(self.desktop_menu_item("Duplicate", Duplicate, window, cx))
+                    .child(self.desktop_menu_item("Delete", text_input::Delete, window, cx))
+                    .child(self.desktop_menu_item("Select All", SelectAll, window, cx));
+            }
+            Some("View") => {
+                items = items
+                    .child(self.desktop_menu_item("Edit document", EditDocument, window, cx))
+                    .child(self.desktop_menu_item("Use document", UseDocument, window, cx));
+            }
+            _ => {}
+        }
+        if self.active_menu.is_some() {
+            bar = bar.child(items);
+        }
+        bar
     }
 }
 
@@ -267,7 +363,7 @@ impl Render for SubCardView {
                     response.await.ok();
                 })
                 .detach();
-                this.file_menu = false;
+                this.active_menu = None;
             }))
             .on_action(cx.listener(|_, _: &Minimize, w, _| w.minimize_window()))
             .on_action(cx.listener(|_, _: &Zoom, w, _| w.zoom_window()))
@@ -281,96 +377,86 @@ impl Render for SubCardView {
                 cx.listener(|this, _: &OpenDocument, w, cx| this.request(Intent::Open, w, cx)),
             )
             .on_action(cx.listener(|this, _: &Close, w, cx| this.request(Intent::Close, w, cx)))
-            .on_action(cx.listener(|_this, _: &Quit, _w, cx| {
-                #[cfg(target_os = "macos")]
-                cx.quit(); // NSApplication asks our termination hook first.
-                #[cfg(not(target_os = "macos"))]
-                _this.request(Intent::Quit, _w, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &ConfirmQuit, w, cx| this.request(Intent::Quit, w, cx)),
-            )
+            .on_action(cx.listener(|_, _: &Quit, _, cx| begin_quit(cx)))
+            .on_action(cx.listener(|_, _: &ConfirmQuit, _, cx| begin_quit(cx)))
             .when(dirty && !self.busy, |el| {
                 el.on_action(cx.listener(|this, _: &Save, w, cx| this.save(false, None, w, cx)))
                     .on_action(cx.listener(|this, _: &SaveAs, w, cx| this.save(true, None, w, cx)))
             })
-            .when(!cfg!(target_os = "macos"), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .p_2()
-                        .gap_4()
-                        .child(
-                            div()
-                                .id("file-menu")
-                                .child("File")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.file_menu = !this.file_menu;
-                                    cx.notify();
-                                })),
-                        )
-                        .when(self.file_menu, |el| {
-                            el.child(div().id("new").child("New").cursor_pointer().on_click(
-                                cx.listener(|this, _, w, cx| this.request(Intent::New, w, cx)),
-                            ))
-                            .child(div().id("open").child("Open…").cursor_pointer().on_click(
-                                cx.listener(|this, _, w, cx| this.request(Intent::Open, w, cx)),
-                            ))
-                            .child(
-                                div()
-                                    .id("save")
-                                    .child("Save")
-                                    .when(!dirty, |el| el.opacity(0.4))
-                                    .on_click(
-                                        cx.listener(|this, _, w, cx| this.save(false, None, w, cx)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("save-as")
-                                    .child("Save As…")
-                                    .when(!dirty, |el| el.opacity(0.4))
-                                    .on_click(
-                                        cx.listener(|this, _, w, cx| this.save(true, None, w, cx)),
-                                    ),
-                            )
-                        }),
-                )
+            .when(!self.busy && self.document.using_document(), |el| {
+                el.on_action(cx.listener(|s, _: &EditDocument, w, cx| s.toggle_mode(w, cx)))
             })
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .p_2()
-                    .items_center()
-                    .child(div().font_weight(FontWeight::BOLD).child(name))
-                    .child(if dirty { "Edited" } else { "Saved" })
-                    .child(
-                        div()
-                            .id("mode")
-                            .cursor_pointer()
-                            .text_color(rgb(0x0066cc))
-                            .child(if self.document.using_document() {
-                                "Use mode · Edit document"
-                            } else {
-                                "Editing mode · Use document"
-                            })
-                            .on_click(cx.listener(|s, _, w, cx| {
-                                s.er_commit_names(cx);
-                                if let Err(e) = s.document.toggle_mode() {
-                                    s.show_error(e, w, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.document.schema_locked(), |d| d.child("Schema locked")),
-            )
+            .when(!self.busy && !self.document.using_document(), |el| {
+                el.on_action(cx.listener(|s, _: &UseDocument, w, cx| s.toggle_mode(w, cx)))
+            })
+            .when(!cfg!(target_os = "macos"), |el| {
+                el.child(self.desktop_menu_bar(window, cx))
+            })
             .child(self.er_render(window, cx))
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().p_2().text_color(rgb(0xb00020)).child(error))
             })
     }
+}
+
+#[derive(Default)]
+struct QuitDocuments {
+    active: bool,
+    remaining: Vec<WindowHandle<SubCardView>>,
+}
+impl Global for QuitDocuments {}
+fn cancel_quit(cx: &mut App) {
+    *cx.global_mut::<QuitDocuments>() = QuitDocuments::default();
+}
+fn begin_quit(cx: &mut App) {
+    if cx.global::<QuitDocuments>().active {
+        return;
+    }
+    let remaining = cx
+        .windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<SubCardView>())
+        .collect();
+    cx.set_global(QuitDocuments {
+        active: true,
+        remaining,
+    });
+    cx.defer(continue_quit);
+}
+fn continue_quit(cx: &mut App) {
+    if !cx.global::<QuitDocuments>().active {
+        return;
+    }
+    if let Some(window) = cx.global_mut::<QuitDocuments>().remaining.pop() {
+        if window
+            .update(cx, |s, w, cx| s.request(Intent::Quit, w, cx))
+            .is_err()
+        {
+            cx.defer(continue_quit);
+        }
+    } else {
+        lifecycle::allow_exit();
+        cx.quit();
+    }
+}
+fn open_document_window(document: Document, cx: &mut App) -> Result<(), String> {
+    let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(720.), px(480.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Untitled — SubCard".into()),
+                ..Default::default()
+            }),
+            app_id: Some("org.subcard.gpui".into()),
+            ..Default::default()
+        },
+        |w, cx| cx.new(|cx| SubCardView::new(document, w, cx)),
+    )
+    .map_err(|e| e.to_string())?;
+    cx.activate(true);
+    Ok(())
 }
 
 fn main() {
@@ -379,6 +465,8 @@ fn main() {
             KeyBinding::new("secondary-z", Undo, Some("ERCanvas")),
             KeyBinding::new("secondary-shift-z", Redo, Some("ERCanvas")),
             KeyBinding::new("secondary-c", Copy, Some("ERCanvas")),
+            KeyBinding::new("secondary-x", Cut, Some("ERCanvas")),
+            KeyBinding::new("secondary-d", Duplicate, Some("ERCanvas")),
             KeyBinding::new("secondary-v", Paste, Some("ERCanvas")),
             KeyBinding::new("delete", text_input::Delete, Some("ERCanvas")),
             KeyBinding::new("backspace", text_input::Delete, Some("ERCanvas")),
@@ -463,7 +551,18 @@ fn main() {
                     MenuItem::os_action("Cut", Cut, OsAction::Cut),
                     MenuItem::os_action("Copy", Copy, OsAction::Copy),
                     MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                    MenuItem::separator(),
+                    MenuItem::action("Duplicate", Duplicate),
+                    MenuItem::action("Delete", text_input::Delete),
+                    MenuItem::separator(),
                     MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+                ],
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Edit document", EditDocument),
+                    MenuItem::action("Use document", UseDocument),
                 ],
             },
             Menu {
@@ -474,26 +573,14 @@ fn main() {
                 ],
             },
         ]);
-        let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(480.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Untitled — SubCard".into()),
-                    ..Default::default()
-                }),
-                app_id: Some("org.subcard.gpui".into()),
-                ..Default::default()
-            },
-            |w, cx| cx.new(|cx| SubCardView::new(w, cx)),
-        )
-        .expect("Unable to open SubCard");
+        cx.set_global(QuitDocuments::default());
+        open_document_window(Document::new().expect("Cannot create document"), cx)
+            .expect("Unable to open SubCard");
         #[cfg(target_os = "macos")]
         {
             let app = cx.to_async();
             lifecycle::install(move || {
-                app.update(|cx| cx.dispatch_action(&ConfirmQuit)).ok();
+                app.update(begin_quit).ok();
             });
         }
         cx.on_window_closed(|cx| {

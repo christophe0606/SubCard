@@ -7,7 +7,7 @@ import UIKit
 /// midpoint on iOS 16; a pinch cancels any pending single-finger table drag.
 struct ERCanvasTouchInput: UIViewRepresentable {
   let drag: (CGPoint, CGPoint) -> Void
-  let end: (CGPoint, CGPoint) -> Void
+  let end: (CGPoint, CGPoint, Int) -> Void
   let cancel: () -> Void
   let pinch: (UIGestureRecognizer.State, CGPoint, CGFloat) -> Void
 
@@ -65,7 +65,7 @@ struct ERCanvasTouchInput: UIViewRepresentable {
       let remaining = activeTouches(touches, event)
       if pinching && remaining.count < 2 { finishPinch(.ended) }
       if !pinching, !suppressDragUntilLift, let start = dragStart, let touch = touches.first {
-        input?.end(start, touch.location(in: self))
+        input?.end(start, touch.location(in: self), touch.tapCount)
       }
       dragStart = nil
       if remaining.isEmpty { suppressDragUntilLift = false }

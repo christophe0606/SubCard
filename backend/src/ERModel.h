@@ -5,7 +5,15 @@
 #include <vector>
 
 namespace subcard {
-struct ERField { int id; std::string name, kind; bool unique = true; };
+struct ERField {
+    int id;
+    std::string name, kind;
+    bool unique = true; // Legacy key default; ordinary fields default to false.
+    bool indexed = false;
+    std::string media = "binary";
+    int scale = 2; // Packed BCD: 18 decimal digits, fixed fractional scale.
+    bool nullable = true; // Missing metadata preserves older nullable columns.
+};
 struct ERTable { int id; std::string name, color; double x, y; std::vector<ERField> fields; };
 // field == 0: conceptual table -> target relationship; generated target.r<ID> references table.id.
 // field != 0: legacy foreign-key edge, retained without rewriting existing data.

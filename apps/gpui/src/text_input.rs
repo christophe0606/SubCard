@@ -652,9 +652,14 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::show_character_palette))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::copy))
+            .when(
+                cx.read_from_clipboard().and_then(|c| c.text()).is_some(),
+                |d| d.on_action(cx.listener(Self::paste)),
+            )
+            .when(!self.selected_range.is_empty(), |d| {
+                d.on_action(cx.listener(Self::cut))
+                    .on_action(cx.listener(Self::copy))
+            })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

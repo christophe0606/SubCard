@@ -2,9 +2,9 @@
 
 ## Implemented behavior
 
-Both desktop frontends edit one document at a time. File > New initializes an
-untitled SQLite database containing the C++ greeting. File > Open… loads an
-existing `.subcard` database. A small single-line document-text field exercises
+Both desktop frontends support independent document windows. File > New opens a
+new window with an untitled SQLite database containing the C++ greeting. File >
+Open… opens an existing `.subcard` database in a new window. A small single-line document-text field exercises
 changes and persistence; it is not yet a card editor.
 
 Save writes to the current file, or opens a native save panel for an untitled
@@ -15,8 +15,8 @@ Reverting the text to its saved value also clears the changed state. A pristine
 untitled document must be edited before its first Save, as required by this menu
 policy. Canceling a panel or a failed save retains the document's edits and path.
 
-New, Open, Close, and Quit ask Save / Cancel / Don't Save before replacing or
-closing edited content. Saving from that prompt completes before continuing;
+New and Open preserve existing windows. Close asks Save / Cancel / Don't Save
+before closing edited content; Quit protects every open document in turn. Saving from that prompt completes before continuing;
 canceling or a save failure stops the pending operation. macOS displays the
 document name and an edited window indicator.
 
@@ -86,7 +86,7 @@ Save As. Its single-line input is adapted from the Apache-licensed upstream GPUI
 input example, including clipboard, selection, Unicode input, and undo/redo.
 On macOS, a small Objective-C-runtime bridge routes system termination requests
 through the same document-aware Quit action; other platforms do not compile it.
-On Linux/Windows, the frontend also exposes an in-window File menu.
+On Linux/Windows, the frontend exposes a separate in-window File/Edit/View menubar.
 
 | Operation | macOS | Linux / Windows |
 | --- | --- | --- |
@@ -125,3 +125,46 @@ unsaved edits. Saves are currently synchronous and suitable for this small
 bootstrap document; large stacks will need a background-save design. Concurrent
 external editing/conflict resolution, multiple document windows, recent-file
 menus, card layout, and scripting are future work.
+
+## Desktop command and document-chrome refinement (2026-10-18)
+
+Desktop document identity and save state are presented by the window title,
+native edited-window indicator and Save menu validation. There is no duplicate
+title or Saved/Edited row over the canvas. Standard commands live in File/Edit,
+including table Cut/Copy/Paste/Duplicate/Delete and Undo/Redo. The canvas toolbar
+contains only canvas tools; table-inspector clipboard/duplicate buttons are
+mobile-only. Mode switching is available from View on desktop.
+
+Text editing retains its native clipboard/undo behavior; canvas commands apply
+only to a canvas selection. GPUI's in-window File/Edit/View fallback on platforms
+without a global native menubar uses the same actions and availability checks.
+The iPhone keeps its navigation/document controls and compact Edit menu. See
+[platform presentation rules](../architecture.md#native-desktop-and-iphone-presentation)
+and the repository `AGENTS.md` for requirements on future features.
+
+## Document windows and global menu routing (2026-10-18)
+
+Each desktop window owns a separate document handle, editor state, selection,
+undo history and pending inspector drafts. Global commands and shortcuts resolve
+against the focused window. Saving, duplicating or deleting in one window must
+never change another window. Save availability follows that window's saved
+snapshot, including uncommitted name edits. Text commands resolve to the focused
+text input before canvas commands.
+
+SwiftUI uses per-window `StateObject` owners and focused-scene objects for menu
+routing. GPUI creates a separate root view and document for each window; its
+focused action tree handles menus and shortcuts. Quit checks all document owners,
+including windows that are not focused. Canceling any save prompt or save panel,
+or a failed save, cancels termination.
+
+For future command changes, test with at least two windows containing different
+models: focus each window, check enabled states, perform the command and verify
+that only its document changes. Include an active text input and unsaved changes
+in a background window when checking edit commands and Quit.
+
+The 2026-10-18 checks covered independent windows in both macOS frontends,
+window-specific Save availability and Duplicate, native inspector text Undo,
+table Copy/Paste between SwiftUI windows, and Quit prompts for two edited
+documents. Automated editor tests also cover independent drafts, selection,
+mutations and undo histories. The remote file-panel keyboard-shortcut check was
+inconclusive under computer use and still needs manual confirmation.

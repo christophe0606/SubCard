@@ -112,8 +112,57 @@ persist independently of history, so navigation cannot consume model undo.
 
 The editor now models A → B as “A has one/many B.” The shared C++ schema generator
 places the hidden reference in B, automatically indexes it, and adds uniqueness
-for 1:1. Both frontends expose only table arrows and cardinality. Graph version 2
+for 1:1. Both frontends keep the canvas limited to tables, arrows and cardinality. Graph version 2
 distinguishes these conceptual arrows from version-1 foreign-key edges; the
 loader preserves existing physical schemas and rows. See the
 [table relationship contract](features/entity-relationship-canvas.md#table-relationships-2026-10-18)
 for generation, compatibility, interaction and verification details.
+
+### Typed fields (2026-10-18)
+
+The shared model also describes ordinary table fields using version-3 ER metadata,
+or version 4 when required fields or independent uniqueness need the newer rules.
+Their datatype, nullability, uniqueness, optional index, BCD scale and blob purpose are edited only in the
+inspector. C++ generates STRICT columns, NOT NULL, UNIQUE and datatype CHECK
+constraints; SwiftUI and
+GPUI own draft text and presentation. Ordinary-field options never expose or
+replace generated relationship keys. See the [typed field contract](features/typed-fields.md)
+for storage formats, compatibility, schema-lock rules and current editor scope.
+
+## Native desktop and iPhone presentation
+
+These rules apply to new features in both frontends and are also recorded in
+`AGENTS.md`. Shared C++ behavior does not imply an identical frontend layout.
+
+| Concern | Desktop | iPhone |
+| --- | --- | --- |
+| Document commands | File menu: New, Open, Close, Save, Save As; standard shortcuts | Navigation/document controls and native Files panels |
+| Standard editing | Edit menu: Undo, Redo, Cut, Copy, Paste, Duplicate, Delete; enable for the active selection/focus | Compact Edit command menu in the canvas toolbar |
+| Document identity | Window title and represented file where available | Navigation title/document controls |
+| Unsaved changes | Native edited-window indicator and enabled/disabled Save command | Mobile save controls/status where useful |
+| Canvas toolbar | Canvas tools: Table, Relationship, zoom, Fit, pending-link cancellation | Canvas tools plus the compact standard-command menu |
+| Table selection | Single click selects and updates the adjacent inspector | Single tap selects; double tap opens details without leaving on a single tap |
+
+Do not duplicate desktop document names or Saved/Edited banners above the canvas.
+Do not add standard clipboard, duplicate, undo/redo or save buttons to the desktop
+canvas toolbar or table inspector. Field-specific properties remain in their
+inline editor. Edit commands must operate on text when a name input is active
+and on the selected table/relationship when the canvas is active; a disabled
+text command must never fall through to a destructive table command. Document
+save and close operations must continue to commit pending inspector drafts.
+
+On macOS, use the native global File/Edit/View menus. GPUI platforms without a
+native global menubar use a separate application menubar, not canvas buttons.
+Session mode changes live in the desktop View menu. iPhone keeps its document
+navigation and toolbar command menu. Review these placements explicitly whenever
+adding commands: determine the target platform, focus/selection, shortcut and
+enabled state, then verify each affected frontend separately. Quit computer-use
+test instances afterward, preserving existing user windows and work.
+
+Every desktop document window owns its document handle and transient editor
+state. Resolve global commands and their enabled states from the focused
+window, then its active text input or canvas selection. A shared document
+singleton or a fallback to the first-created window is prohibited. New and Open
+create independent windows; Close targets the focused window, and Quit protects
+unsaved edits across every window. Verify routing with two different documents,
+including Save availability, clipboard actions, undo/redo and background edits.

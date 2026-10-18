@@ -117,8 +117,21 @@ std::string quote(sqlite3 *db, const std::string &s) {
 }
 std::string num(double n) { return std::to_string(n); }
 std::string num(int n) { return std::to_string(n); }
+bool legacy(const ERField &f) { return f.kind == "index" || f.kind == "secondary"; }
+bool ordinary(const std::string &kind) {
+    return kind == "string" || kind == "url" || kind == "date" || kind == "time" ||
+           kind == "datetime" || kind == "decimal" || kind == "float" ||
+           kind == "integer" || kind == "boolean" || kind == "blob";
+}
+bool indexable(const std::string &kind) { return ordinary(kind) && kind != "blob" && kind != "decimal"; }
 std::string graph_json(sqlite3 *db, const ERGraph &g) {
-    std::string s = "{\"version\":2,\"tables\":[";
+    bool typed = false, rules = false;
+    for (const auto &t : g.tables)
+        for (const auto &f : t.fields) {
+            typed = typed || !legacy(f);
+            rules = rules || (!legacy(f) && (!f.nullable || (f.unique && !f.indexed)));
+        }
+    std::string s = std::string("{\"version\":") + (rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -132,7 +145,12 @@ std::string graph_json(sqlite3 *db, const ERGraph &g) {
                 s += ",";
             f = false;
             s += "{\"id\":" + num(v.id) + ",\"name\":" + quote(db, v.name) +
-                 ",\"kind\":" + quote(db, v.kind) + ",\"unique\":" + (v.unique ? "true" : "false") + "}";
+                 ",\"kind\":" + quote(db, v.kind) + ",\"unique\":" + (v.unique ? "true" : "false");
+            if (!legacy(v))
+                s += ",\"indexed\":" + std::string(v.indexed ? "true" : "false") +
+                     ",\"nullable\":" + (v.nullable ? "true" : "false") +
+                     ",\"media\":" + quote(db, v.media) + ",\"scale\":" + num(v.scale);
+            s += "}";
         }
         s += "]}";
     }
@@ -151,17 +169,24 @@ std::string graph_json(sqlite3 *db, const ERGraph &g) {
 }
 ERTable table_from(const JSON &j) {
     ERTable t{j.id("id"), j.str("name"), j.str("color"), j.number("x"), j.number("y"), {}};
-    for (auto &f : j.array("fields"))
-        t.fields.push_back({f.id("id"), f.str("name"), f.str("kind"), f.type("unique").empty() ? true : f.boolean("unique")});
+    for (auto &f : j.array("fields")) {
+        ERField v{f.id("id"), f.str("name"), f.str("kind")};
+        v.unique = f.type("unique").empty() ? legacy(v) : f.boolean("unique");
+        if (!f.type("indexed").empty()) v.indexed = f.boolean("indexed");
+        if (!f.type("nullable").empty()) v.nullable = f.boolean("nullable");
+        if (!f.type("media").empty()) v.media = f.str("media");
+        if (!f.type("scale").empty()) v.scale = f.id("scale");
+        t.fields.push_back(v);
+    }
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") == 1 || j.id("version") == 2, "Unsupported ER model version.");
+    require(j.id("version") >= 1 && j.id("version") <= 4, "Unsupported ER model version.");
     ERGraph g;
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
     for (auto &e : j.array("edges")) {
-        require(j.id("version") == 2 || e.id("field") != 0, "Version-1 edges require a foreign-key field.");
+        require(j.id("version") >= 2 || e.id("field") != 0, "Version-1 edges require a foreign-key field.");
         g.edges.push_back({e.id("id"), e.id("table"), e.id("field"), e.id("target"), e.id("targetField"),
                            e.boolean("many"), e.boolean("cascade")});
     }
@@ -217,13 +242,20 @@ int validate(ERGraph &g) {
                     std::all_of(t.color.begin() + 1, t.color.end(),
                                 [](unsigned char c) { return std::isxdigit(c); }),
                 "Expected a #RRGGBB color.");
-        require(t.fields.size() <= 128, "Too many indexed fields.");
+        require(t.fields.size() <= 128, "A table supports at most 128 fields.");
         std::set<std::string> fn{"id"};
         for (auto &f : t.fields) {
             id(f.id);
             name(f.name);
             require(fn.insert(lower(f.name)).second, "Field names must be unique, including id.");
-            require(f.kind == "index" || f.kind == "secondary", "Unknown field kind.");
+            require(legacy(f) || ordinary(f.kind), "Unknown field datatype.");
+            if (!legacy(f)) {
+                require(!f.indexed || indexable(f.kind), "Blob and packed BCD fields do not support optional lookup indexes.");
+                require(f.media == "binary" || (f.kind == "blob" &&
+                        (f.media == "image" || f.media == "video" || f.media == "sound" || f.media == "document")),
+                        "Choose a valid blob purpose.");
+                require(f.scale >= 0 && f.scale <= 18, "BCD scale must be between 0 and 18.");
+            } else require(f.nullable, "Generated keys retain their existing nullability.");
         }
     }
     std::set<int> connected;
@@ -246,14 +278,57 @@ int validate(ERGraph &g) {
     }
     return highest;
 }
+std::string date_rule(const std::string &v) {
+    return "length(CAST(" + v + " AS BLOB))=10 AND " + v +
+           " GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(" +
+           v + ",'+0 days') IS " + v;
+}
+std::string time_rule(const std::string &v) {
+    return "length(CAST(" + v + " AS BLOB))=8 AND " + v +
+           " GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(" + v + ",1,2)<'24'";
+}
+std::string field_check(const ERField &f, const std::string &col) {
+    std::string rule;
+    if (f.kind == "boolean") rule = col + " IN (0,1)";
+    // Canonical ISO values preserve chronological order in ordinary indexes.
+    if (f.kind == "date") rule = date_rule(col);
+    if (f.kind == "time") rule = time_rule(col);
+    if (f.kind == "datetime")
+        rule = "length(CAST(" + col + " AS BLOB))=20 AND substr(" + col +
+               ",11,1)='T' AND substr(" + col + ",20,1)='Z' AND " +
+               date_rule("substr(" + col + ",1,10)") + " AND " + time_rule("substr(" + col + ",12,8)");
+    if (f.kind == "decimal") {
+        // Leading zero pad, 18 digit nibbles, C/D sign. Canonical positive zero.
+        const auto h = "hex(" + col + ")";
+        rule = "length(" + col + ")=10 AND substr(" + h + ",1,1)='0' AND substr(" + h +
+               ",2,18) NOT GLOB '*[^0-9]*' AND substr(" + h + ",20,1) IN ('C','D') AND (substr(" +
+               h + ",2,18)!='000000000000000000' OR substr(" + h + ",20,1)='C')";
+    }
+    if (f.kind == "url") {
+        // An absolute URI: a nonempty ASCII scheme and no whitespace/control bytes.
+        rule = "instr(" + col + ",':')>1 AND substr(" + col + ",1,1) GLOB '[A-Za-z]' AND substr(" +
+               col + ",1,instr(" + col + ",':')-1) NOT GLOB '*[^A-Za-z0-9+.-]*' AND length(" +
+               col + ")>instr(" + col + ",':') AND " + col +
+               " NOT GLOB '*['||char(1)||'-'||char(32)||char(127)||']*' AND instr(" + col + ",char(0))=0";
+    }
+    return rule.empty() ? "" : " CHECK(" + col + " IS NULL OR (" + rule + "))";
+}
 std::string schema(const ERGraph &g) {
     std::string sql;
     for (const auto &t : g.tables) {
         sql += "CREATE TABLE user_t" + std::to_string(t.id) + "(id INTEGER PRIMARY KEY AUTOINCREMENT";
         for (const auto &f : t.fields) {
-            sql += ",f" + std::to_string(f.id) + " INTEGER";
-            if (f.kind == "index" && f.unique)
+            const std::string col = "f" + num(f.id);
+            std::string storage = "INTEGER";
+            if (f.kind == "string" || f.kind == "url" || f.kind == "date" || f.kind == "time" ||
+                f.kind == "datetime") storage = "TEXT";
+            if (f.kind == "float") storage = "REAL";
+            if (f.kind == "blob" || f.kind == "decimal") storage = "BLOB";
+            sql += "," + col + " " + storage;
+            if (!f.nullable) sql += " NOT NULL";
+            if ((f.kind == "index" || !legacy(f)) && f.unique)
                 sql += " UNIQUE";
+            sql += field_check(f, col);
             for (const auto &e : g.edges)
                 if (e.table == t.id && e.field == f.id) {
                     if (!e.many)
@@ -276,7 +351,8 @@ std::string schema(const ERGraph &g) {
                 sql += "CREATE INDEX user_r" + num(e.id) + " ON user_t" + num(t.id) +
                        "(r" + num(e.id) + ");";
         for (const auto &f : t.fields)
-            if (f.kind == "secondary" || !f.unique)
+            if (f.kind == "secondary" || (f.kind == "index" && !f.unique) ||
+                (!legacy(f) && f.indexed && !f.unique))
                 sql += "CREATE INDEX user_i" + std::to_string(f.id) + " ON user_t" + std::to_string(t.id) +
                        "(f" + std::to_string(f.id) + ");";
     }
@@ -411,10 +487,47 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(),
                                      [&](auto &e) { return e.table == id || e.target == id; }),
                       g.edges.end());
+    } else if (op == "add_field") {
+        ERField f{next++, j.str("name"), j.str("kind"), false};
+        require(ordinary(f.kind), "Choose a standard field datatype.");
+        if (!j.type("indexed").empty()) f.indexed = j.boolean("indexed");
+        if (!j.type("unique").empty()) f.unique = j.boolean("unique");
+        if (!j.type("nullable").empty()) f.nullable = j.boolean("nullable");
+        if (!j.type("media").empty()) f.media = j.str("media");
+        if (!j.type("scale").empty()) f.scale = j.id("scale");
+        table(g, j.id("table")).fields.push_back(f);
+    } else if (op == "update_field") {
+        auto &f = field(table(g, j.id("table")), j.id("id"));
+        require(!legacy(f), "Generated keys are managed through relationships.");
+        const auto before = f;
+        if (!j.type("name").empty()) f.name = j.str("name");
+        if (!j.type("kind").empty()) {
+            f.kind = j.str("kind");
+            require(ordinary(f.kind), "Choose a standard field datatype.");
+            if (!indexable(f.kind)) f.indexed = false;
+            if (f.kind != "blob") f.media = "binary";
+        }
+        if (!j.type("indexed").empty()) f.indexed = j.boolean("indexed");
+        if (!j.type("unique").empty()) f.unique = j.boolean("unique");
+        if (!j.type("nullable").empty()) f.nullable = j.boolean("nullable");
+        if (!j.type("media").empty()) f.media = j.str("media");
+        if (!j.type("scale").empty()) f.scale = j.id("scale");
+        changesSchema = before.kind != f.kind || before.indexed != f.indexed ||
+                        before.unique != f.unique || before.nullable != f.nullable ||
+                        before.media != f.media || before.scale != f.scale;
+    } else if (op == "delete_field") {
+        auto &t = table(g, j.id("table"));
+        int id = j.id("id");
+        require(!legacy(field(t, id)), "Generated keys are managed through relationships.");
+        t.fields.erase(std::remove_if(t.fields.begin(), t.fields.end(),
+                                      [&](const auto &f) { return f.id == id; }), t.fields.end());
     } else if (op == "add_index") {
-        table(g, j.id("table")).fields.push_back({next++, j.str("name"), j.str("kind"), j.type("unique").empty() ? true : j.boolean("unique")});
+        ERField f{next++, j.str("name"), j.str("kind"), j.type("unique").empty() ? true : j.boolean("unique")};
+        require(legacy(f), "Use add_field for ordinary data fields.");
+        table(g, j.id("table")).fields.push_back(f);
     } else if (op == "update_index") {
         auto &f = field(table(g, j.id("table")), j.id("id"));
+        require(legacy(f), "Use update_field for ordinary data fields.");
         f.name = j.str("name");
         changesSchema = false;
         if (!j.type("unique").empty()) {
@@ -426,7 +539,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
     } else if (op == "delete_index") {
         int id = j.id("id");
         auto &t = table(g, j.id("table"));
-        field(t, id);
+        require(legacy(field(t, id)), "Use delete_field for ordinary data fields.");
         t.fields.erase(std::remove_if(t.fields.begin(), t.fields.end(), [&](auto &f) { return f.id == id; }),
                        t.fields.end());
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(),
@@ -464,7 +577,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
     if (json == graph_json(db, m.graph))
         return false;
     // Label edits are still schema edits, even though stable SQL IDs need no DDL.
-    bool labels = op == "update_index" ||
+    bool labels = op == "update_index" || op == "update_field" ||
                   (op == "update_table" && table(g, j.id("id")).name != table(m.graph, j.id("id")).name);
     require(!state.schema_locked || (!changesSchema && !labels),
             "The user schema is locked because this document has held real data.");

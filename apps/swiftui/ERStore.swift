@@ -8,11 +8,49 @@ import SwiftUI
   import UIKit
 #endif
 
+enum ERDatatype: String, CaseIterable, Identifiable {
+  case string, url, date, time, datetime, decimal, float, integer, boolean, blob
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .string: return "String"
+    case .url: return "URL"
+    case .date: return "Date"
+    case .time: return "Time"
+    case .datetime: return "Date-time"
+    case .decimal: return "Binary coded decimal (BCD)"
+    case .float: return "Float"
+    case .integer: return "Integer"
+    case .boolean: return "Boolean"
+    case .blob: return "Blob"
+    }
+  }
+  var indexable: Bool { self != .blob && self != .decimal }
+}
 struct ERField: Codable, Identifiable {
   var id: Int
   var name: String
   var kind: String
   var unique: Bool
+  var indexed: Bool = false
+  var nullable: Bool = true
+  var media: String = "binary"
+  var scale: Int = 2
+  var datatype: ERDatatype? { ERDatatype(rawValue: kind) }
+  var typeTitle: String { datatype?.title ?? kind }
+  enum CodingKeys: String, CodingKey { case id, name, kind, unique, indexed, nullable, media, scale }
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(Int.self, forKey: .id)
+    name = try c.decode(String.self, forKey: .name)
+    kind = try c.decode(String.self, forKey: .kind)
+    unique =
+      try c.decodeIfPresent(Bool.self, forKey: .unique) ?? (kind == "index" || kind == "secondary")
+    indexed = try c.decodeIfPresent(Bool.self, forKey: .indexed) ?? false
+    nullable = try c.decodeIfPresent(Bool.self, forKey: .nullable) ?? true
+    media = try c.decodeIfPresent(String.self, forKey: .media) ?? "binary"
+    scale = try c.decodeIfPresent(Int.self, forKey: .scale) ?? 2
+  }
 }
 struct ERTable: Codable, Identifiable {
   var id: Int
@@ -22,6 +60,7 @@ struct ERTable: Codable, Identifiable {
   var y: Double
   var fields: [ERField]
   var height: Double { 64 }
+  var dataFields: [ERField] { fields.filter { $0.datatype != nil } }
 }
 struct EREdge: Codable, Identifiable {
   var id: Int
@@ -48,12 +87,18 @@ final class ERStore: ObservableObject {
   @Published var graph = ERGraph()
   @Published var selectedTable: Int?
   @Published var selectedEdge: Int?
+  @Published var selectedField: Int?
+  @Published var fieldNameDraft = ""
+  private var fieldNameBaseline = ""
   @Published var pendingSource: Int?
   @Published var tableNameDraft = ""
   private var tableNameBaseline = ""
-  var hasDraft: Bool { tableNameDraft != tableNameBaseline }
+  var hasDraft: Bool { tableNameDraft != tableNameBaseline || fieldNameDraft != fieldNameBaseline }
   @Published var error: String?
   @Published var showDetails = false
+  // Transient command routing; native text editing takes precedence over table actions.
+  @Published var editingText = false
+  @Published var textSelectionVersion = 0
   @Published private(set) var animatedViewport: ERViewport?
   private var revealTask: Task<Void, Never>?
   var viewport: ERViewport { animatedViewport ?? graph.view }
@@ -63,12 +108,16 @@ final class ERStore: ObservableObject {
   var editable: Bool { document.map { subcard_document_mode($0) == SUBCARD_MODE_EDIT } ?? false }
   var locked: Bool { document.map { subcard_document_schema_is_locked($0) != 0 } ?? true }
   var table: ERTable? { graph.tables.first { $0.id == selectedTable } }
+  var field: ERField? { table?.dataFields.first { $0.id == selectedField } }
   var edge: EREdge? { graph.edges.first { $0.id == selectedEdge } }
   func attach(_ pointer: OpaquePointer, changed: @escaping () -> Void) {
     if document != pointer {
       cancelReveal()
       selectedTable = nil
       selectedEdge = nil
+      selectedField = nil
+      fieldNameDraft = ""
+      fieldNameBaseline = ""
       pendingSource = nil
       tableNameDraft = ""
       tableNameBaseline = ""
@@ -88,6 +137,11 @@ final class ERStore: ObservableObject {
     if !editable || locked || !graph.tables.contains(where: { $0.id == pendingSource }) {
       pendingSource = nil
     }
+    if field == nil { selectedField = nil }
+    if fieldNameDraft == fieldNameBaseline || field == nil {
+      fieldNameDraft = field?.name ?? ""
+      fieldNameBaseline = fieldNameDraft
+    }
     if tableNameDraft == tableNameBaseline || table == nil {
       tableNameDraft = table?.name ?? ""
       tableNameBaseline = tableNameDraft
@@ -102,6 +156,34 @@ final class ERStore: ObservableObject {
       tableNameDraft = table?.name ?? ""
       tableNameBaseline = tableNameDraft
     }
+    if let t = table, let f = field, fieldNameDraft != fieldNameBaseline {
+      let name = fieldNameDraft
+      execute("update_field", ["table": t.id, "id": f.id, "name": name])
+      fieldNameDraft = field?.name ?? ""
+      fieldNameBaseline = fieldNameDraft
+    }
+  }
+  func selectField(_ id: Int?) {
+    commitNames()
+    selectedField = id
+    fieldNameDraft = field?.name ?? ""
+    fieldNameBaseline = fieldNameDraft
+  }
+  func addField(_ type: ERDatatype) {
+    commitNames()
+    guard let t = table else { return }
+    var n = 1
+    while t.fields.contains(where: { $0.name.lowercased() == "field \(n)" }) { n += 1 }
+    let count = t.fields.count
+    command("add_field", ["table": t.id, "name": "Field \(n)", "kind": type.rawValue])
+    if table?.fields.count == count + 1 { selectField(table?.dataFields.last?.id) }
+  }
+  func updateField(_ f: ERField, _ properties: [String: Any]) {
+    guard let t = table else { return }
+    var values = properties
+    values["table"] = t.id
+    values["id"] = f.id
+    command("update_field", values)
   }
   func command(_ op: String, _ properties: [String: Any] = [:]) {
     commitNames()
@@ -126,11 +208,20 @@ final class ERStore: ObservableObject {
     commitNames()
     selectedTable = table
     selectedEdge = edge
+    selectedField = nil
+    fieldNameDraft = ""
+    fieldNameBaseline = ""
     tableNameDraft = self.table?.name ?? ""
     tableNameBaseline = tableNameDraft
     #if os(iOS)
       if details && (selectedTable != nil || selectedEdge != nil) { showDetails = true }
     #endif
+  }
+  // Compact navigation covers the canvas; desktop selection updates the adjacent inspector.
+  // UIKit supplies the actual tap count, so separate single taps never act as a double tap.
+  func selectTableFromCanvas(_ id: Int, tapCount: Int, compact: Bool) {
+    select(table: id, details: false)
+    showDetails = compact && tapCount >= 2
   }
   func beginConnection() {
     commitNames()
@@ -165,7 +256,8 @@ final class ERStore: ObservableObject {
       ])
     guard graph.tables.count == count + 1, let added = graph.tables.last else { return }
     select(table: added.id, details: false)
-    let target = graph.view.revealing(CGRect(x: added.x, y: added.y, width: 320, height: added.height), in: canvasSize)
+    let target = graph.view.revealing(
+      CGRect(x: added.x, y: added.y, width: 320, height: added.height), in: canvasSize)
     view(target)
     animateReveal(from: start, to: graph.view)
   }
@@ -176,13 +268,32 @@ final class ERStore: ObservableObject {
       "update_table", ["id": t.id, "name": name ?? current.name, "color": color ?? current.color])
   }
   func copy() { _ = copyToClipboard() }
-  private func copyToClipboard() -> Bool {
+  private func clipboardText() -> String? {
     commitNames()
     guard let table, let data = try? JSONEncoder().encode(table),
       let obj = try? JSONSerialization.jsonObject(with: data),
       let payload = try? JSONSerialization.data(withJSONObject: ["subcardTable": 1, "table": obj]),
       let text = String(data: payload, encoding: .utf8)
+    else { return nil }
+    return text
+  }
+  #if os(macOS)
+  var canPasteTable: Bool {
+    guard let text = NSPasteboard.general.string(forType: .string),
+      let data = text.data(using: .utf8),
+      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return false }
+    return obj["subcardTable"] as? Int == 1 && obj["table"] != nil
+  }
+  func clipboardProviders(cutting: Bool = false) -> [NSItemProvider] {
+    guard let text = clipboardText() else { return [] }
+    let providers = [NSItemProvider(object: text as NSString)]
+    if cutting, editable, !locked { deleteSelection() }
+    return providers
+  }
+  #endif
+  private func copyToClipboard() -> Bool {
+    guard let text = clipboardText() else { return false }
     #if os(macOS)
       NSPasteboard.general.clearContents()
       return NSPasteboard.general.setString(text, forType: .string)
@@ -244,8 +355,7 @@ final class ERStore: ObservableObject {
         let progress = (ProcessInfo.processInfo.systemUptime - began) / 0.5
         guard progress < 1 else { break }
         self?.animatedViewport = start.panned(toward: target, progress: progress)
-        do { try await Task.sleep(nanoseconds: 16_666_667) }
-        catch { return }
+        do { try await Task.sleep(nanoseconds: 16_666_667) } catch { return }
       }
       if !Task.isCancelled { self?.animatedViewport = nil }
     }

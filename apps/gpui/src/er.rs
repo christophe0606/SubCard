@@ -3,12 +3,37 @@ use crate::{SubCardView, text_input::TextInput};
 use gpui::{prelude::*, *};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{cell::Cell, rc::Rc, time::Instant};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 fn default_unique() -> bool {
     true
 }
+fn default_nullable() -> bool {
+    true
+}
 
+const DATATYPES: [(&str, &str); 10] = [
+    ("string", "String"),
+    ("url", "URL"),
+    ("date", "Date"),
+    ("time", "Time"),
+    ("datetime", "Date-time"),
+    ("decimal", "Binary coded decimal (BCD)"),
+    ("float", "Float"),
+    ("integer", "Integer"),
+    ("boolean", "Boolean"),
+    ("blob", "Blob"),
+];
+fn default_media() -> String {
+    "binary".into()
+}
+fn default_scale() -> u32 {
+    2
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Field {
     pub id: i32,
@@ -16,6 +41,29 @@ pub struct Field {
     pub kind: String,
     #[serde(default = "default_unique")]
     pub unique: bool,
+    #[serde(default)]
+    pub indexed: bool,
+    #[serde(default = "default_nullable")]
+    pub nullable: bool,
+    #[serde(default = "default_media")]
+    pub media: String,
+    #[serde(default = "default_scale")]
+    pub scale: u32,
+}
+impl Field {
+    fn ordinary(&self) -> bool {
+        DATATYPES.iter().any(|(kind, _)| *kind == self.kind)
+    }
+    fn title(&self) -> &str {
+        DATATYPES
+            .iter()
+            .find(|(kind, _)| *kind == self.kind)
+            .map(|(_, title)| *title)
+            .unwrap_or(&self.kind)
+    }
+    fn indexable(&self) -> bool {
+        self.ordinary() && self.kind != "blob" && self.kind != "decimal"
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Table {
@@ -134,6 +182,10 @@ pub struct ERState {
     pub focus: FocusHandle,
     pub name: Entity<TextInput>,
     name_baseline: String,
+    pub selected_field: Option<i32>,
+    field_name: Entity<TextInput>,
+    field_baseline: String,
+    field_menu: Option<bool>, // true: add; false: change datatype.
     _subscriptions: Vec<Subscription>,
     pending: Option<i32>,
     link_start: Option<(f64, f64)>,
@@ -147,8 +199,10 @@ pub struct ERState {
 impl ERState {
     pub fn new(window: &mut Window, cx: &mut Context<SubCardView>) -> Self {
         let name = cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Table name"));
+        let field_name =
+            cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Field name"));
         let mut subscriptions = Vec::new();
-        for input in [&name] {
+        for input in [&name, &field_name] {
             subscriptions.push(cx.on_blur(&input.focus_handle(cx), window, |s, _, cx| {
                 s.er_commit_names(cx)
             }));
@@ -171,6 +225,10 @@ impl ERState {
             name,
             _subscriptions: subscriptions,
             name_baseline: String::new(),
+            selected_field: None,
+            field_name,
+            field_baseline: String::new(),
+            field_menu: None,
             pending: None,
             link_start: None,
             drag: None,
@@ -368,8 +426,31 @@ impl SubCardView {
     }
     pub fn er_has_draft(&self, cx: &App) -> bool {
         self.er.name.read(cx).content.as_ref() != self.er.name_baseline
+            || self.er.field_name.read(cx).content.as_ref() != self.er.field_baseline
     }
     fn er_load_names(&mut self, cx: &mut Context<Self>) {
+        let field_name = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)
+            .and_then(|t| {
+                t.fields
+                    .iter()
+                    .find(|f| Some(f.id) == self.er.selected_field && f.ordinary())
+            })
+            .map(|f| f.name.clone());
+        if field_name.is_none() {
+            self.er.selected_field = None;
+        }
+        let field_name = field_name.unwrap_or_default();
+        self.er.field_baseline = field_name.clone();
+        if self.er.field_name.read(cx).content.as_ref() != field_name {
+            self.er
+                .field_name
+                .update(cx, |i, cx| i.set_content(field_name, cx));
+        }
         let name = self
             .er
             .graph
@@ -395,11 +476,28 @@ impl SubCardView {
             .find(|t| Some(t.id) == self.er.selected)
         {
             let name = self.er.name.read(cx).content.to_string();
-            if let Err(e) = self
-                .document
-                .er_command(json!({"op":"update_table","id":t.id,"name":name,"color":t.color}))
+            if name != self.er.name_baseline {
+                if let Err(e) = self
+                    .document
+                    .er_command(json!({"op":"update_table","id":t.id,"name":name,"color":t.color}))
+                {
+                    self.error = Some(e);
+                }
+            }
+            if let Some(f) = t
+                .fields
+                .iter()
+                .find(|f| Some(f.id) == self.er.selected_field && f.ordinary())
             {
-                self.error = Some(e);
+                let name = self.er.field_name.read(cx).content.to_string();
+                if name != self.er.field_baseline {
+                    if let Err(e) = self
+                        .document
+                        .er_command(json!({"op":"update_field","table":t.id,"id":f.id,"name":name}))
+                    {
+                        self.error = Some(e);
+                    }
+                }
             }
         }
         self.er_refresh();
@@ -434,9 +532,49 @@ impl SubCardView {
         self.er_commit_names(cx);
         self.er.selected = table;
         self.er.edge = edge;
+        self.er.selected_field = None;
+        self.er.field_menu = None;
         self.er_load_names(cx);
         w.focus(&self.er.focus);
         cx.notify();
+    }
+    fn er_select_field(&mut self, id: Option<i32>, cx: &mut Context<Self>) {
+        self.er_commit_names(cx);
+        self.er.selected_field = id;
+        self.er.field_menu = None;
+        self.er_load_names(cx);
+        cx.notify();
+    }
+    fn er_add_field(&mut self, kind: &str, cx: &mut Context<Self>) {
+        self.er_commit_names(cx);
+        if let Some(t) = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)
+        {
+            let id = t.id;
+            let count = t.fields.len();
+            let mut n = 1;
+            while t
+                .fields
+                .iter()
+                .any(|f| f.name.to_lowercase() == format!("field {n}"))
+            {
+                n += 1;
+            }
+            self.er_command(
+                json!({"op":"add_field","table":id,"name":format!("Field {n}"),"kind":kind}),
+                cx,
+            );
+            if let Some(t) = self.er.graph.tables.iter().find(|t| t.id == id) {
+                if t.fields.len() == count + 1 {
+                    let added = t.fields.last().map(|f| f.id);
+                    self.er_select_field(added, cx);
+                }
+            }
+        }
     }
     fn er_begin_connection(&mut self, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
@@ -749,8 +887,17 @@ impl SubCardView {
         let mut graph = self.er.graph.clone();
         graph.view = self.er.viewport();
         let tables = self.er.tables();
+        let can_undo = graph.can_undo;
+        let can_redo = graph.can_redo;
         let selected = self.er.selected;
         let selected_edge = self.er.edge;
+        let text_focus = self.er.name.focus_handle(cx).is_focused(window)
+            || self.er.field_name.focus_handle(cx).is_focused(window);
+        let paste_available = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .is_some_and(|v| v["subcardTable"] == 1);
         let pending = self.er.pending;
         let link = self.er.link_preview;
         let bounds = self.er.bounds.clone();
@@ -794,13 +941,6 @@ impl SubCardView {
                 },
             ))
             .child(button("Fit", true, cx, |s, _, cx| s.er_fit(cx)))
-            .child(button("Undo", edit && graph.can_undo, cx, |s, _, cx| {
-                s.er_command(json!({"op":"undo"}), cx)
-            }))
-            .child(button("Redo", edit && graph.can_redo, cx, |s, _, cx| {
-                s.er_command(json!({"op":"redo"}), cx)
-            }))
-            .child(button("Paste", schema, cx, |s, w, cx| s.er_paste(w, cx)))
             .when(pending.is_some(), |d| {
                 d.child(button("Choose a table • Cancel", true, cx, |s, _, cx| {
                     s.er.pending = None;
@@ -862,19 +1002,39 @@ impl SubCardView {
             .min_h_0()
             .track_focus(&self.er.focus)
             .key_context("ERCanvas")
-            .on_action(cx.listener(|s, _: &crate::Undo, _, cx| {
-                if s.er.graph.can_undo {
-                    s.er_command(json!({"op":"undo"}), cx);
-                }
-            }))
-            .on_action(cx.listener(|s, _: &crate::Redo, _, cx| {
-                if s.er.graph.can_redo {
-                    s.er_command(json!({"op":"redo"}), cx);
-                }
-            }))
-            .on_action(cx.listener(|s, _: &crate::Copy, _, cx| s.er_copy(cx)))
-            .on_action(cx.listener(|s, _: &crate::Paste, w, cx| s.er_paste(w, cx)))
-            .on_action(cx.listener(|s, _: &crate::text_input::Delete, _, cx| s.er_delete(cx)))
+            .when(!text_focus && edit && can_undo, |d| {
+                d.on_action(
+                    cx.listener(|s, _: &crate::Undo, _, cx| s.er_command(json!({"op":"undo"}), cx)),
+                )
+            })
+            .when(!text_focus && edit && can_redo, |d| {
+                d.on_action(
+                    cx.listener(|s, _: &crate::Redo, _, cx| s.er_command(json!({"op":"redo"}), cx)),
+                )
+            })
+            .when(!text_focus && selected.is_some(), |d| {
+                d.on_action(cx.listener(|s, _: &crate::Copy, _, cx| s.er_copy(cx)))
+            })
+            .when(!text_focus && schema && selected.is_some(), |d| {
+                d.on_action(cx.listener(|s, _: &crate::Cut, _, cx| {
+                    s.er_copy(cx);
+                    s.er_delete(cx);
+                }))
+            })
+            .when(!text_focus && schema && paste_available, |d| {
+                d.on_action(cx.listener(|s, _: &crate::Paste, w, cx| s.er_paste(w, cx)))
+            })
+            .when(schema && selected.is_some(), |d| {
+                d.on_action(cx.listener(|s, _: &crate::Duplicate, w, cx| s.er_duplicate(w, cx)))
+            })
+            .when(
+                !text_focus && schema && (selected.is_some() || selected_edge.is_some()),
+                |d| {
+                    d.on_action(
+                        cx.listener(|s, _: &crate::text_input::Delete, _, cx| s.er_delete(cx)),
+                    )
+                },
+            )
             .child(toolbar)
             .child(
                 div()
@@ -993,24 +1153,216 @@ impl SubCardView {
                         }
                     })));
             }
-            panel = panel.child(colors)
-                .child(button("Create relationship", schema, cx, |s,_,cx| s.er_begin_connection(cx)))
-                .child("Choose a table to complete the arrow, or drag the right circle to another table.");
+            panel = panel.child(colors);
             panel = panel
                 .child(
                     div()
                         .border_t_1()
                         .pt_2()
-                        .flex()
-                        .gap_2()
-                        .child(button("Copy", true, cx, |s, _, cx| s.er_copy(cx)))
-                        .child(button("Duplicate", schema, cx, |s, w, cx| {
-                            s.er_duplicate(w, cx)
-                        })),
+                        .font_weight(FontWeight::BOLD)
+                        .child("Fields"),
                 )
-                .child(button("Delete table", schema, cx, move |s, _, cx| {
-                    s.er_command(json!({"op":"delete_table","id":id}), cx)
-                }));
+                .child(button(
+                    "Add field ▾",
+                    schema && t.fields.len() < 128,
+                    cx,
+                    |s, _, cx| {
+                        s.er_commit_names(cx);
+                        s.er.field_menu = if s.er.field_menu == Some(true) {
+                            None
+                        } else {
+                            Some(true)
+                        };
+                        cx.notify();
+                    },
+                ));
+            if self.er.field_menu == Some(true) && schema {
+                let mut choices = div().flex().flex_col().gap_1();
+                for (kind, title) in DATATYPES {
+                    choices = choices.child(button(title, true, cx, move |s, _, cx| {
+                        s.er_add_field(kind, cx)
+                    }));
+                }
+                panel = panel.child(choices);
+            }
+            if !t.fields.iter().any(Field::ordinary) {
+                panel = panel.child("Add fields such as a name, birthday or photo.");
+            }
+            for f in t.fields.iter().filter(|f| f.ordinary()) {
+                let fid = f.id;
+                panel = panel.child(
+                    button(
+                        format!(
+                            "{} {} · {}{}",
+                            if self.er.selected_field == Some(fid) {
+                                "▾"
+                            } else {
+                                "▸"
+                            },
+                            f.name,
+                            f.title(),
+                            if f.indexed || f.unique {
+                                " · indexed"
+                            } else {
+                                ""
+                            }
+                        ),
+                        true,
+                        cx,
+                        move |s, w, cx| {
+                            let next = if s.er.selected_field == Some(fid) {
+                                None
+                            } else {
+                                Some(fid)
+                            };
+                            s.er_select_field(next, cx);
+                            w.focus(&s.er.focus);
+                        },
+                    )
+                    .id(("field-row", fid as usize))
+                    .when(self.er.selected_field == Some(fid), |d| d.bg(rgb(0xcfe1fa))),
+                );
+                if self.er.selected_field == Some(fid) {
+                    let mut details = div()
+                        .id(("field-details", fid as usize))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .p_3()
+                        .ml_2()
+                        .border_l_2()
+                        .border_color(rgb(0x93b7ea))
+                        .bg(rgb(0xf5f8fc))
+                        .child("Field name");
+                    if schema {
+                        details = details.child(self.er.field_name.clone());
+                    } else {
+                        details = details.child(f.name.clone());
+                    }
+                    details = details.child(button(
+                        format!("Datatype: {} ▾", f.title()),
+                        schema,
+                        cx,
+                        |s, _, cx| {
+                            s.er_commit_names(cx);
+                            s.er.field_menu = if s.er.field_menu == Some(false) {
+                                None
+                            } else {
+                                Some(false)
+                            };
+                            cx.notify();
+                        },
+                    ));
+                    if self.er.field_menu == Some(false) && schema {
+                        let mut choices = div().flex().flex_col().gap_1();
+                        for (kind, title) in DATATYPES {
+                            choices = choices.child(button(title, true, cx, move |s, _, cx| {
+                                s.er_command(
+                                    json!({"op":"update_field","table":id,"id":fid,"kind":kind}),
+                                    cx,
+                                );
+                                s.er.field_menu = None;
+                            }));
+                        }
+                        details = details.child(choices);
+                    }
+                    let nullable = f.nullable;
+                    details = details.child(button(
+                        if nullable { "Allow NULL: yes" } else { "Allow NULL: no" },
+                        schema,
+                        cx,
+                        move |s, _, cx| {
+                            s.er_command(
+                                json!({"op":"update_field","table":id,"id":fid,"nullable":!nullable}),
+                                cx,
+                            )
+                        },
+                    ));
+                    let unique = f.unique;
+                    details = details
+                        .child(button(
+                            if unique {
+                                "Unique values: yes"
+                            } else {
+                                "Unique values: no"
+                            },
+                            schema,
+                            cx,
+                            move |s, _, cx| {
+                                s.er_command(
+                                    json!({"op":"update_field","table":id,"id":fid,"unique":!unique}),
+                                    cx,
+                                )
+                            },
+                        ))
+                        .child("NULL means no value; empty text is still a value.");
+                    if unique && nullable {
+                        details = details.child("Multiple records may have no value. Values that are present must be unique.");
+                    }
+                    if f.indexable() {
+                        let indexed = f.indexed || unique;
+                        details = details.child(button(
+                            if indexed {
+                                "Indexed: yes"
+                            } else {
+                                "Indexed: no"
+                            },
+                            schema && !unique,
+                            cx,
+                            move |s, _, cx| {
+                                s.er_command(
+                                json!({"op":"update_field","table":id,"id":fid,"indexed":!indexed}),
+                                cx,
+                            )
+                            },
+                        ));
+                    }
+                    if unique {
+                        details = details.child("Uniqueness automatically creates an index.");
+                    }
+                    if f.kind == "decimal" {
+                        let scale = f.scale;
+                        details=details.child(format!("Decimal places: {scale}"))
+                        .child(div().flex().gap_2()
+                            .child(button("Fewer places",schema && scale>0,cx,move|s,_,cx|s.er_command(json!({"op":"update_field","table":id,"id":fid,"scale":scale.saturating_sub(1)}),cx)))
+                            .child(button("More places",schema && scale<18,cx,move|s,_,cx|s.er_command(json!({"op":"update_field","table":id,"id":fid,"scale":scale+1}),cx))))
+                        .child("Exact decimal, up to 18 digits. Uniqueness compares exact decimal values.");
+                    }
+                    if f.kind == "url" {
+                        details=details.child("An absolute URL, such as https://example.com or mailto:person@example.com.");
+                    }
+                    if f.kind == "blob" {
+                        details = details.child("Content");
+                        let mut purposes = div().flex().flex_wrap().gap_1();
+                        for (media, title) in [
+                            ("binary", "Binary data"),
+                            ("image", "Image"),
+                            ("video", "Video"),
+                            ("sound", "Sound"),
+                            ("document", "Document"),
+                        ] {
+                            purposes = purposes.child(
+                                button(title, schema, cx, move |s, _, cx| {
+                                    s.er_command(
+                                    json!({"op":"update_field","table":id,"id":fid,"media":media}),
+                                    cx,
+                                )
+                                })
+                                .when(f.media == media, |d| d.bg(rgb(0xcfe1fa))),
+                            );
+                        }
+                        details=details.child(purposes).child("Stored inside the stack, for example a person’s photo. Uniqueness compares the stored bytes.");
+                    }
+                    details = details.child(button("Delete field", schema, cx, move |s, _, cx| {
+                        s.er_command(json!({"op":"delete_field","table":id,"id":fid}), cx)
+                    }));
+                    panel = panel.child(details.with_animation(
+                        ("field-disclosure", fid as usize),
+                        Animation::new(Duration::from_millis(220)).with_easing(ease_in_out),
+                        |element, progress| element.opacity(progress),
+                    ));
+                }
+            }
         } else {
             panel=panel.child("Select a table or relationship arrow to edit its properties.")
                 .child("Drag table headers to move. Drag the background or scroll to pan. Ctrl/Command + scroll zooms.");
@@ -1142,15 +1494,11 @@ fn paint(
             };
             w.paint_quad(quad(
                 rect,
-                px(5.),
-                white(),
+                px((8. * s) as f32),
+                color(&t.color),
                 px(if selected { 3. } else { 1. }),
                 c,
                 Default::default(),
-            ));
-            w.paint_quad(fill(
-                Bounds::new(p, size(rect.size.width, px((60. * s) as f32))),
-                color(&t.color),
             ));
             let clip = Bounds::new(
                 p + point(px((14. * s) as f32), px(0.)),
@@ -1268,7 +1616,7 @@ mod viewport_tests {
     use super::{Table, Viewport};
     #[::core::prelude::v1::test]
     fn relationship_direction_hidden_keys_and_parallel_routes() {
-        use super::{Edge, Field, label_position, route};
+        use super::{Edge, Field, default_media, default_scale, label_position, route};
         let a = Table {
             id: 1,
             name: "A".into(),
@@ -1280,6 +1628,10 @@ mod viewport_tests {
                 name: "legacy hidden key".into(),
                 kind: "secondary".into(),
                 unique: true,
+                indexed: false,
+                nullable: true,
+                media: default_media(),
+                scale: default_scale(),
             }],
         };
         let b = Table {
@@ -1328,6 +1680,32 @@ mod viewport_tests {
         let self_route = route(&tables, &self_edge, std::slice::from_ref(&self_edge));
         assert_eq!(self_route.len(), 6);
         assert!(self_route.iter().any(|p| p.1 > 164.));
+    }
+    #[::core::prelude::v1::test]
+    fn typed_field_options_round_trip_without_changing_canvas_geometry() {
+        let mut table: Table = serde_json::from_value(serde_json::json!({
+            "id":1,"name":"People","color":"#397DB8","x":10.,"y":10.,
+            "fields":[
+                {"id":2,"name":"Homepage","kind":"url","unique":true,"indexed":false,"nullable":false,"media":"binary","scale":2},
+                {"id":3,"name":"Photo","kind":"blob","unique":true,"indexed":false,"media":"image","scale":2},
+                {"id":4,"name":"Balance","kind":"decimal","unique":false,"indexed":false,"media":"binary","scale":4},
+                {"id":5,"name":"Legacy hidden key","kind":"index"}
+            ]
+        })).unwrap();
+        assert_eq!(table.height(), 64.);
+        assert_eq!(table.fields.iter().filter(|f| f.ordinary()).count(), 3);
+        assert!(table.fields[0].indexable() && !table.fields[0].indexed && table.fields[0].unique);
+        assert!(!table.fields[0].nullable);
+        assert!(table.fields[1].nullable && table.fields[1].unique);
+        assert_eq!(table.fields[0].title(), "URL");
+        assert!(!table.fields[1].indexable() && !table.fields[2].indexable());
+        assert!(table.fields[3].unique); // Legacy default stays compatible.
+        let copy: Table = serde_json::from_str(&serde_json::to_string(&table).unwrap()).unwrap();
+        assert_eq!(copy.fields[1].media, "image");
+        assert!(!copy.fields[0].nullable && copy.fields[0].unique && copy.fields[1].nullable);
+        assert_eq!(copy.fields[2].scale, 4);
+        table.fields.clear();
+        assert_eq!(table.height(), copy.height());
     }
     #[::core::prelude::v1::test]
     fn animated_reveal_preserves_scale_and_moves_continuously() {

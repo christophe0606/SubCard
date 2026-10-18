@@ -55,11 +55,11 @@ void sql(const std::string &file, const char *sql) {
     assert(sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close(db);
 }
-std::string join_plan(const std::string &file) {
+std::string join_plan(const std::string &file, const char *query = "EXPLAIN QUERY PLAN SELECT b.id FROM user_t1 a JOIN user_t2 b ON b.r3=a.id WHERE a.id=1") {
     sqlite3 *db = nullptr;
     assert(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt *q = nullptr;
-    assert(sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN SELECT b.id FROM user_t1 a JOIN user_t2 b ON b.r3=a.id WHERE a.id=1", -1, &q, nullptr) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(db, query, -1, &q, nullptr) == SQLITE_OK);
     std::string plan;
     int result;
     while ((result = sqlite3_step(q)) == SQLITE_ROW)
@@ -177,10 +177,223 @@ void table_relationships(const std::filesystem::path &directory) {
     assert(scalar(legacyPath, "SELECT json_extract(json,'$.version') FROM subcard_system_er_model") == "2");
     std::cout << "Table relationship direction, automatic indexes, cardinality, history and persistence passed.\n";
 }
+// Ordinary fields exist only in the inspector; the core owns their persistent schema.
+void typed_fields(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"People","x":10,"y":10})");
+    const char *kinds[] = {"string", "url", "date", "time", "datetime", "decimal", "float", "integer", "boolean", "blob"};
+    for (const auto *kind : kinds)
+        cmd(d, std::string(R"({"op":"add_field","table":1,"name":")") + kind + R"(","kind":")" + kind + R"("})");
+    assert(graph(d).find("\"version\":3") != std::string::npos);
+    fail(d, R"({"op":"add_field","table":1,"name":"unknown","kind":"money"})");
+    fail(d, R"({"op":"add_field","table":1,"name":"ID","kind":"integer"})");
+    fail(d, R"({"op":"add_field","table":1,"name":"String","kind":"string"})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"indexed":"yes"})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"unique":"yes"})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"media":"image"})");
+    fail(d, R"({"op":"update_field","table":1,"id":11,"media":"executable"})");
+    fail(d, R"({"op":"update_field","table":1,"id":7,"scale":19})");
+    fail(d, R"({"op":"update_field","table":1,"id":7,"scale":1.5})");
+    fail(d, R"({"op":"update_field","table":1,"id":7,"indexed":true})");
+    fail(d, R"({"op":"update_field","table":1,"id":11,"indexed":true})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"kind":"index"})");
+    fail(d, R"({"op":"update_index","table":1,"id":2,"name":"bad"})");
+    fail(d, R"({"op":"add_index","table":1,"name":"bad","kind":"string","unique":false})");
+    fail(d, R"({"op":"delete_index","table":1,"id":2})");
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"indexed":true})");
+    cmd(d, R"({"op":"update_field","table":1,"id":3,"indexed":true,"unique":true})");
+    cmd(d, R"({"op":"update_field","table":1,"id":4,"indexed":true})");
+    cmd(d, R"({"op":"update_field","table":1,"id":9,"indexed":true})");
+    cmd(d, R"({"op":"update_field","table":1,"id":11,"media":"image","name":"Portrait"})");
+    const auto file = (directory / "typed-fields.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), file.c_str())); };
+    save();
+    assert(scalar(file, "SELECT group_concat(type,',') FROM pragma_table_info('user_t1')") == "INTEGER,TEXT,TEXT,TEXT,TEXT,TEXT,BLOB,REAL,INTEGER,INTEGER,BLOB");
+    assert(scalar(file, "SELECT count(*) FROM pragma_index_list('user_t1')") == "4");
+    assert(scalar(file, "SELECT count(*) FROM pragma_index_list('user_t1') WHERE [unique]=1") == "1");
+    assert(scalar(file, "SELECT count(*) FROM pragma_index_info('user_i2') WHERE name='f2'") == "1");
+    // Actual query plans, not just metadata, prove the optional index is usable.
+    assert(join_plan(file, "EXPLAIN QUERY PLAN SELECT id FROM user_t1 WHERE f2='Zoë'").find("USING COVERING INDEX user_i2") != std::string::npos);
+    assert(join_plan(file, "EXPLAIN QUERY PLAN SELECT id FROM user_t1 WHERE f4>='2024-01-01'").find("USING COVERING INDEX user_i4") != std::string::npos);
+    write(d, "INSERT INTO user_t1(f2,f3,f4,f5,f6,f7,f8,f9,f10,f11) VALUES('Zoë','https://example.com','2024-02-29','23:59:59','2024-02-29T23:59:59Z',x'0000000000000012345C',1.25,-42,1,x'89504e47000aff')");
+    write(d, "INSERT INTO user_t1(f2,f3) VALUES('Zoë','mailto:person@example.com'); INSERT INTO user_t1 DEFAULT VALUES");
+    write(d, "INSERT INTO user_t1(f7) VALUES(x'0000000000000012345D'),(x'0000000000000000000C')");
+    for (const auto *sql : {
+        "INSERT INTO user_t1(f3) VALUES('https://example.com')", // unique
+        "INSERT INTO user_t1(f3) VALUES('relative/path')",
+        "INSERT INTO user_t1(f3) VALUES('https://bad url')",
+        "INSERT INTO user_t1(f3) VALUES('1bad:value')",
+        "INSERT INTO user_t1(f3) VALUES('https:')",
+        "INSERT INTO user_t1(f4) VALUES('2023-02-29')",
+        "INSERT INTO user_t1(f4) VALUES('2024-04-31')",
+        "INSERT INTO user_t1(f4) VALUES('2024-2-01')",
+        "INSERT INTO user_t1(f4) VALUES('2024-02-29'||char(0))",
+        "INSERT INTO user_t1(f5) VALUES('12:00:00'||char(0))",
+        "INSERT INTO user_t1(f6) VALUES('2024-02-29T23:59:59Z'||char(0))",
+        "INSERT INTO user_t1(f3) VALUES('https://example.org'||char(0))",
+        "INSERT INTO user_t1(f5) VALUES('24:00:00')",
+        "INSERT INTO user_t1(f5) VALUES('12:59:60')",
+        "INSERT INTO user_t1(f6) VALUES('2024-02-29T23:59:59')",
+        "INSERT INTO user_t1(f6) VALUES('2023-02-29T23:59:59Z')",
+        "INSERT INTO user_t1(f7) VALUES(x'1000000000000012345C')", // invalid pad
+        "INSERT INTO user_t1(f7) VALUES(x'0000000000000012345F')", // invalid sign
+        "INSERT INTO user_t1(f7) VALUES(x'123C')", // wrong BCD size
+        "INSERT INTO user_t1(f7) VALUES(x'000000000000001234AC')", // non-digit nibble
+        "INSERT INTO user_t1(f7) VALUES(x'0000000000000000000D')", // negative zero
+        "INSERT INTO user_t1(f8) VALUES('text')",
+        "INSERT INTO user_t1(f9) VALUES(1.5)",
+        "INSERT INTO user_t1(f10) VALUES(2)",
+        "INSERT INTO user_t1(f11) VALUES('not binary')"})
+        assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, sql));
+    fail(d, R"({"op":"update_field","table":1,"id":2,"kind":"integer"})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"indexed":false})");
+    fail(d, R"({"op":"delete_field","table":1,"id":11})");
+    // Labels keep stable columns, preserve bytes and do not discard fake rows.
+    cmd(d, R"({"op":"update_field","table":1,"id":11,"name":"Photo"})");
+    save();
+    assert(scalar(file, "SELECT hex(f11) FROM user_t1 WHERE id=1") == "89504E47000AFF");
+    assert(scalar(file, "SELECT hex(f7) FROM user_t1 WHERE id=1") == "0000000000000012345C");
+    auto reopened = own(subcard_document_open(file.c_str()));
+    assert(graph(reopened).find("\"media\":\"image\"") != std::string::npos);
+    assert(graph(reopened).find("Photo") != std::string::npos);
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"kind":"blob","media":"document"})");
+    save();
+    assert(scalar(file, "SELECT count(*) FROM sqlite_schema WHERE name='user_i2'") == "0");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(file, "SELECT count(*) FROM sqlite_schema WHERE name='user_i2'") == "1");
+    cmd(d, R"({"op":"redo"})");
+    cmd(d, R"({"op":"update_field","table":1,"id":7,"scale":4})");
+    cmd(d, R"({"op":"delete_field","table":1,"id":11})");
+    cmd(d, R"({"op":"undo"})");
+    cmd(d, R"({"op":"update_field","table":1,"id":3,"indexed":false,"unique":false})");
+    save();
+    assert(scalar(file, "SELECT count(*) FROM pragma_index_list('user_t1') WHERE [unique]=1") == "0");
+    // Duplicate keeps field metadata but remaps all IDs and has no relationships.
+    sqlite3 *db = nullptr;
+    assert(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt *q = nullptr;
+    assert(sqlite3_prepare_v2(db, "SELECT json_extract(json,'$.tables[0]') FROM subcard_system_er_model", -1, &q, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(q) == SQLITE_ROW);
+    const std::string copy = reinterpret_cast<const char *>(sqlite3_column_text(q, 0));
+    sqlite3_finalize(q); sqlite3_close(db);
+    cmd(d, "{\"op\":\"paste_table\",\"table\":" + copy + "}");
+    save();
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].fields[9].media') FROM subcard_system_er_model") == "image");
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].fields[5].scale') FROM subcard_system_er_model") == "4");
+    auto duplicate = own(subcard_document_open(file.c_str()));
+    write(d, "INSERT INTO user_t1(f11) VALUES(x'00010200ff')", SUBCARD_DATA_REAL);
+    fail(d, R"({"op":"update_field","table":1,"id":11,"name":"Locked photo"})");
+    fail(d, R"({"op":"update_field","table":1,"id":11,"media":"video"})");
+    fail(d, R"({"op":"add_field","table":1,"name":"Locked","kind":"string"})");
+    fail(d, R"({"op":"delete_field","table":1,"id":11})");
+    save();
+    auto real = own(subcard_document_open(file.c_str()));
+    assert(subcard_document_schema_is_locked(real.get()));
+    assert(scalar(file, "SELECT hex(f11) FROM user_t1") == "00010200FF");
+    std::cout << "Typed field storage, validation, indexes, media bytes, locks, history and persistence passed.\n";
+}
+void field_rules(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Rules","x":10,"y":10})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Required unique","kind":"string","nullable":false,"unique":true})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Optional unique","kind":"string","unique":true})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Required repeated","kind":"integer","nullable":false})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Optional repeated","kind":"string"})");
+    fail(d, R"({"op":"add_field","table":1,"name":"Invalid","kind":"string","nullable":0})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"nullable":null})");
+    const auto file = (directory / "field-rules.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), file.c_str())); };
+    save();
+    assert(scalar(file, "SELECT json_extract(json,'$.version') FROM subcard_system_er_model") == "4");
+    assert(scalar(file, "SELECT group_concat([notnull]) FROM pragma_table_info('user_t1') WHERE name!='id'") == "1,0,1,0");
+    write(d, "INSERT INTO user_t1(f2,f4,f5) VALUES('one',7,'same'),('two',7,'same')");
+    write(d, "UPDATE user_t1 SET f3='present' WHERE id=1");
+    for (const auto *statement : {
+        "INSERT INTO user_t1(f4) VALUES(7)",
+        "INSERT INTO user_t1(f2,f4) VALUES(NULL,7)",
+        "INSERT INTO user_t1(f2) VALUES('three')",
+        "UPDATE user_t1 SET f2=NULL WHERE id=1",
+        "UPDATE user_t1 SET f4=NULL WHERE id=1",
+        "INSERT INTO user_t1(f2,f4) VALUES('one',7)",
+        "UPDATE user_t1 SET f2='one' WHERE id=2",
+        "UPDATE user_t1 SET f3='present' WHERE id=2",
+        "INSERT INTO user_t1(f2,f4) VALUES('three',7); UPDATE user_t1 SET f2=NULL WHERE id=1"})
+        assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, statement));
+    save();
+    assert(scalar(file, "SELECT count(*) FROM user_t1") == "2");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"nullable":true})");
+    fail(d, R"({"op":"update_field","table":1,"id":3,"unique":false})");
+    // Constraints belong to SQLite, including writes outside SubCard's API.
+    sqlite3 *db = nullptr;
+    assert(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
+    sqlite3_extended_result_codes(db, 1);
+    assert(sqlite3_exec(db, "INSERT INTO user_t1(f4) VALUES(7)", nullptr, nullptr, nullptr) == SQLITE_CONSTRAINT_NOTNULL);
+    assert(sqlite3_exec(db, "INSERT INTO user_t1(f2,f4) VALUES('one',7)", nullptr, nullptr, nullptr) == SQLITE_CONSTRAINT_UNIQUE);
+    sqlite3_close(db);
+    auto reopened = own(subcard_document_open(file.c_str()));
+    assert(graph(reopened).find("\"nullable\":false") != std::string::npos);
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"nullable":true,"unique":false})");
+    save();
+    assert(scalar(file, "SELECT [notnull] FROM pragma_table_info('user_t1') WHERE name='f2'") == "0");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(file, "SELECT [notnull] FROM pragma_table_info('user_t1') WHERE name='f2'") == "1");
+    assert(scalar(file, "SELECT count(*) FROM pragma_index_list('user_t1') WHERE [unique]=1") == "2");
+    cmd(d, R"({"op":"redo"})");
+    cmd(d, R"({"op":"undo"})");
+    // Optional lookup indexes and datatype changes preserve the two field rules.
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"indexed":true})");
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"indexed":false})");
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"kind":"blob"})");
+    save();
+    assert(scalar(file, "SELECT sql FROM sqlite_schema WHERE name='user_t1'").find("f2 BLOB NOT NULL UNIQUE") != std::string::npos);
+    cmd(d, R"({"op":"undo"})");
+    save();
+    const auto copy = scalar(file, "SELECT json_extract(json,'$.tables[0]') FROM subcard_system_er_model");
+    cmd(d, "{\"op\":\"paste_table\",\"table\":" + copy + "}");
+    save();
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].fields[0].nullable') FROM subcard_system_er_model") == "0");
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].fields[0].unique') FROM subcard_system_er_model") == "1");
+    auto copied = own(subcard_document_open(file.c_str()));
+    write(d, "INSERT INTO user_t1(f2,f4) VALUES('',7)", SUBCARD_DATA_REAL); // NOT NULL allows empty text.
+    fail(d, R"({"op":"update_field","table":1,"id":2,"nullable":true})");
+    fail(d, R"({"op":"update_field","table":1,"id":3,"unique":false})");
+
+    // Every datatype supports required/unique values, including BLOB and packed BCD.
+    const char *kinds[] = {"string", "url", "date", "time", "datetime", "decimal", "float", "integer", "boolean", "blob"};
+    const char *values[] = {"'value'", "'https://example.com'", "'2024-02-29'", "'23:59:59'", "'2024-02-29T23:59:59Z'", "x'0000000000000012345C'", "1.25", "42", "1", "x'000100ff'"};
+    for (size_t i = 0; i < 10; ++i) {
+        auto typed = own(subcard_document_new());
+        cmd(typed, R"({"op":"add_table","name":"Typed rules","x":10,"y":10})");
+        cmd(typed, std::string(R"({"op":"add_field","table":1,"name":"Value","nullable":false,"unique":true,"kind":")") + kinds[i] + "\"}");
+        assert(!subcard_document_write_user_data(typed.get(), SUBCARD_DATA_FAKE, "INSERT INTO user_t1 DEFAULT VALUES"));
+        auto statement = std::string("INSERT INTO user_t1(f2) VALUES(") + values[i] + ")";
+        write(typed, statement.c_str());
+        assert(!subcard_document_write_user_data(typed.get(), SUBCARD_DATA_FAKE, statement.c_str()));
+        assert(!subcard_document_write_user_data(typed.get(), SUBCARD_DATA_FAKE, "UPDATE user_t1 SET f2=NULL"));
+    }
+    // Older typed documents omit nullable; reopening keeps their schema and rows intact.
+    auto legacy = own(subcard_document_new());
+    cmd(legacy, R"({"op":"add_table","name":"Old typed table","x":10,"y":10})");
+    cmd(legacy, R"({"op":"add_field","table":1,"name":"Value","kind":"string"})");
+    write(legacy, "INSERT INTO user_t1 DEFAULT VALUES", SUBCARD_DATA_REAL);
+    assert(subcard_document_save(legacy.get(), file.c_str()));
+    sql(file, "UPDATE subcard_system_er_model SET json=json_remove(json,'$.tables[0].fields[0].nullable')");
+    auto old = own(subcard_document_open(file.c_str()));
+    assert(graph(old).find("\"nullable\":true") != std::string::npos);
+    assert(subcard_document_schema_is_locked(old.get()));
+    assert(scalar(file, "SELECT f2 IS NULL FROM user_t1") == "1");
+    std::cout << "Field nullability/uniqueness, all datatypes, history, locks and backward compatibility passed.\n";
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
     table_relationships(argv[1]);
+    typed_fields(argv[1]);
+    field_rules(argv[1]);
     auto file = (std::filesystem::path(argv[1]) / "er.subcard").string();
     std::filesystem::remove(file);
     auto d = own(subcard_document_new());

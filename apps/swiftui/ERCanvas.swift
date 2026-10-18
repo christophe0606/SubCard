@@ -36,10 +36,14 @@ struct ERCanvasEditor: View {
       #endif
     }
     #if os(macOS)
-      .focusedSceneValue(\.erActions, ERFocusedActions(store: store))
+      .focusedSceneObject(store)
+      .onReceive(NotificationCenter.default.publisher(for: NSTextView.didChangeSelectionNotification)) { _ in
+        store.textSelectionVersion &+= 1
+      }
     #endif
     .onAppear { attach(document) }
     .onChange(of: store.tableNameDraft) { _ in draftChanged(store.hasDraft) }
+    .onChange(of: store.fieldNameDraft) { _ in draftChanged(store.hasDraft) }
     .id(document)
     .onChange(of: document) { pointer in attach(pointer) }
     .alert(
@@ -56,99 +60,309 @@ struct ERCanvasEditor: View {
     registerEditor { [weak store] detach in
       store?.commitNames()
       draftChanged(false)
-      if detach { store?.cancelReveal(); store?.document = nil }
+      if detach {
+        store?.cancelReveal()
+        store?.document = nil
+      }
     }
   }
 }
 
 private struct ERInspector: View {
   @ObservedObject var store: ERStore
-  private enum Editing: Hashable { case table }
+  private enum Editing: Hashable {
+    case table
+    case field(Int)
+  }
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @FocusState private var editing: Editing?
   private let colors = ["#397DB8", "#7651A8", "#258775", "#BA6B28", "#B64762", "#556275"]
   private var schemaEditable: Bool { store.editable && !store.locked }
+  private var fieldAnimation: Animation? { reduceMotion ? nil : .easeInOut(duration: 0.22) }
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 16) {
-        Text("Model details").font(.title2).bold()
-        if let e = store.edge {
-          Text("Relationship").font(.headline)
-          Text("From: \(store.tableName(e.sourceTable))")
-          Text("To: \(store.tableName(e.destinationTable))")
-          connectionProperties(e)
-          Button("Delete relationship", role: .destructive) {
-            finishEditing()
-            store.command("delete_connection", ["id": e.id])
-          }.disabled(!schemaEditable)
-        } else if let t = store.table {
-          Text(t.name).font(.headline).accessibilityIdentifier("modelTableName")
-          TextField("Table name", text: $store.tableNameDraft)
-            .textFieldStyle(.roundedBorder).focused($editing, equals: .table)
-            .submitLabel(.done).onSubmit { finishEditing() }.disabled(!schemaEditable)
-          Text("Table color").font(.headline)
-          HStack {
-            ForEach(colors, id: \.self) { color in
-              Button {
-                finishEditing()
-                store.updateTable(t, color: color)
-              } label: {
-                Circle().fill(erColor(color)).frame(width: 24, height: 24)
-                  .overlay(
-                    Circle().stroke(t.color == color ? Color.primary : Color.clear, lineWidth: 2))
-              }.buttonStyle(.plain).accessibilityLabel("Color \(color)")
-            }
-          }.disabled(!store.editable)
-          Divider()
-          Button("Create relationship") { store.beginConnection(); store.showDetails = false }
-            .disabled(!schemaEditable)
-          Text("Choose another table to complete the arrow, or drag from this table’s right circle to another table.")
-            .font(.caption).foregroundStyle(.secondary)
-          Divider()
-          HStack {
-            Button("Copy") {
+    ScrollViewReader { reader in
+      ScrollView {
+        VStack(alignment: .leading, spacing: 16) {
+          Text("Model details").font(.title2).bold()
+          if let e = store.edge {
+            Text("Relationship").font(.headline)
+            Text("From: \(store.tableName(e.sourceTable))")
+            Text("To: \(store.tableName(e.destinationTable))")
+            connectionProperties(e)
+            Button("Delete relationship", role: .destructive) {
               finishEditing()
-              store.copy()
-            }
-            Button("Duplicate") {
-              finishEditing()
-              store.duplicate()
+              store.command("delete_connection", ["id": e.id])
             }.disabled(!schemaEditable)
-          }
-          Button("Delete table", role: .destructive) {
-            finishEditing()
-            store.command("delete_table", ["id": t.id])
-          }.disabled(!schemaEditable)
-        } else {
-          Text("Select a table or relationship arrow to edit its properties.").foregroundStyle(
-            .secondary)
-          Text(
-            "Drag a table to move it. Drag its right circle to another table to create a relationship."
-          )
-        }
-        Divider()
-        Text("100% scale calibration").font(.headline)
-        Text("At 100%, the title font em is 1 cm. Adjust against a ruler for this display.").font(
-          .caption)
-        Slider(
-          value: Binding(
-            get: { store.graph.view.calibration },
-            set: { value in
+          } else if let t = store.table {
+            Text(t.name).font(.headline).accessibilityIdentifier("modelTableName")
+            nameInput("Table name", text: $store.tableNameDraft, focus: .table)
+            Text("Table color").font(.headline)
+            HStack {
+              ForEach(colors, id: \.self) { color in
+                Button {
+                  finishEditing()
+                  store.updateTable(t, color: color)
+                } label: {
+                  Circle().fill(erColor(color)).frame(width: 24, height: 24)
+                    .overlay(
+                      Circle().stroke(t.color == color ? Color.primary : Color.clear, lineWidth: 2))
+                }.buttonStyle(.plain).accessibilityLabel("Color \(color)")
+              }
+            }.disabled(!store.editable)
+            Divider()
+            fields(t)
+            Divider()
+            #if os(iOS)
+            HStack {
+              Button("Copy") {
+                finishEditing()
+                store.copy()
+              }
+              Button("Duplicate") {
+                finishEditing()
+                store.duplicate()
+              }.disabled(!schemaEditable)
+            }
+            Button("Delete table", role: .destructive) {
               finishEditing()
-              var v = store.graph.view
-              v.calibration = value
-              store.view(v)
-            }), in: 0.25...4)
-        Text("\(store.graph.view.calibration, specifier: "%.2f")×")
-        if store.locked { Text("Schema locked: this document has held real data.").font(.caption) }
-      }.padding()
+              store.command("delete_table", ["id": t.id])
+            }.disabled(!schemaEditable)
+            #endif
+          } else {
+            Text("Select a table or relationship arrow to edit its properties.").foregroundStyle(
+              .secondary)
+            Text(
+              "Drag a table to move it. Drag its right circle to another table to create a relationship."
+            )
+          }
+          Divider()
+          Text("100% scale calibration").font(.headline)
+          Text("At 100%, the title font em is 1 cm. Adjust against a ruler for this display.").font(
+            .caption)
+          Slider(
+            value: Binding(
+              get: { store.graph.view.calibration },
+              set: { value in
+                finishEditing()
+                var v = store.graph.view
+                v.calibration = value
+                store.view(v)
+              }), in: 0.25...4)
+          Text("\(store.graph.view.calibration, specifier: "%.2f")×")
+          if store.locked {
+            Text("Schema locked: this document has held real data.").font(.caption)
+          }
+        }.padding()
+      }
+      .buttonStyle(.bordered)
+      .onChange(of: editing) { value in
+        store.editingText = value != nil
+        store.commitNames()
+      }
+      .onDisappear { finishEditing(); store.editingText = false }
+      .onChange(of: store.selectedField) { id in
+        if let id {
+          withAnimation(fieldAnimation) { reader.scrollTo("field-\(id)", anchor: .top) }
+        }
+      }
     }
-    .buttonStyle(.bordered)
-    .onChange(of: editing) { _ in store.commitNames() }
-    .onDisappear { finishEditing() }
   }
   private func finishEditing() {
     store.commitNames()
     editing = nil
+  }
+  private func fields(_ table: ERTable) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        Text("Fields").font(.headline)
+        Spacer()
+        Menu("Add field") {
+          ForEach(ERDatatype.allCases) { type in
+            Button(type.title) {
+              finishEditing()
+              store.addField(type)
+            }
+          }
+        }.disabled(!schemaEditable || table.fields.count >= 128)
+      }
+      if table.dataFields.isEmpty {
+        Text("Add fields to describe each record, such as a name, birthday or photo.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      ForEach(table.dataFields) { field in
+        let expanded = store.selectedField == field.id
+        VStack(alignment: .leading, spacing: 0) {
+          Button {
+            finishEditing()
+            withAnimation(fieldAnimation) { store.selectField(expanded ? nil : field.id) }
+          } label: {
+            HStack(spacing: 8) {
+              Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .foregroundStyle(.secondary)
+              Text(field.name).lineLimit(1).foregroundStyle(.primary)
+              Spacer(minLength: 4)
+              Text(field.typeTitle).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+              if field.indexed || field.unique {
+                Image(systemName: "magnifyingglass").accessibilityLabel("Indexed")
+              }
+            }
+            .padding(12).frame(minHeight: 44).frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .accessibilityIdentifier("fieldRow-\(field.id)")
+          .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+          .accessibilityHint(expanded ? "Collapse field details" : "Expand field details")
+          if expanded {
+            Divider()
+            fieldProperties(table, field: field)
+              .padding(12)
+              .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
+          }
+        }
+        .background(Color.primary.opacity(0.025))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+          RoundedRectangle(cornerRadius: 10).stroke(
+            expanded ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+        .id("field-\(field.id)")
+      }
+    }
+    .animation(fieldAnimation, value: store.selectedField)
+  }
+  private func nameInput(_ title: String, text: Binding<String>, focus: Editing) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(title).font(.caption).foregroundStyle(.secondary)
+      if schemaEditable {
+        #if os(iOS)
+          HStack(spacing: 8) {
+            TextField(title, text: text)
+              .textFieldStyle(.plain).focused($editing, equals: focus)
+              .submitLabel(.done).onSubmit { finishEditing() }
+              .textInputAutocapitalization(.words)
+            Image(systemName: "pencil").font(.caption).foregroundStyle(.secondary)
+              .accessibilityHidden(true).allowsHitTesting(false)
+          }
+          .padding(.horizontal, 12).padding(.vertical, 10).frame(minHeight: 44)
+          .background(
+            Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8)
+          )
+          .overlay(
+            RoundedRectangle(cornerRadius: 8).stroke(
+              editing == focus ? Color.accentColor : Color.secondary.opacity(0.6),
+              lineWidth: editing == focus ? 2 : 1))
+        #else
+          TextField(title, text: text)
+            .textFieldStyle(.roundedBorder).focused($editing, equals: focus)
+            .onSubmit { finishEditing() }
+        #endif
+      } else {
+        Text(text.wrappedValue).frame(maxWidth: .infinity, alignment: .leading)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+  private func fieldProperties(_ table: ERTable, field: ERField) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      if let type = field.datatype {
+        nameInput("Field name", text: $store.fieldNameDraft, focus: .field(field.id))
+        Picker(
+          "Datatype",
+          selection: Binding(
+            get: { type },
+            set: { value in
+              finishEditing()
+              store.updateField(field, ["kind": value.rawValue])
+            })
+        ) {
+          ForEach(ERDatatype.allCases) { value in Text(value.title).tag(value) }
+        }.disabled(!schemaEditable)
+        Toggle(
+          "Allow NULL",
+          isOn: Binding(
+            get: { field.nullable },
+            set: { value in
+              finishEditing()
+              store.updateField(field, ["nullable": value])
+            })
+        ).disabled(!schemaEditable)
+        Toggle(
+          "Unique values",
+          isOn: Binding(
+            get: { field.unique },
+            set: { value in
+              finishEditing()
+              store.updateField(field, ["unique": value])
+            })
+        ).disabled(!schemaEditable)
+        Text("NULL means no value; empty text is still a value.")
+          .font(.caption).foregroundStyle(.secondary)
+        if field.unique && field.nullable {
+          Text("Multiple records may have no value. Values that are present must be unique.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        if type.indexable {
+          Toggle(
+            "Indexed",
+            isOn: Binding(
+              get: { field.indexed || field.unique },
+              set: { value in
+                finishEditing()
+                store.updateField(field, ["indexed": value])
+              })
+          ).disabled(!schemaEditable || field.unique)
+        }
+        if field.unique {
+          Text("Uniqueness automatically creates an index.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        if type == .decimal {
+          Stepper(
+            "Decimal places: \(field.scale)",
+            value: Binding(
+              get: { field.scale },
+              set: { value in
+                finishEditing()
+                store.updateField(field, ["scale": value])
+              }), in: 0...18
+          ).disabled(!schemaEditable)
+          Text("Exact decimal, up to 18 digits. Uniqueness compares exact decimal values.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        if type == .url {
+          Text("An absolute URL, such as https://example.com or mailto:person@example.com.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        if type == .blob {
+          Picker(
+            "Content",
+            selection: Binding(
+              get: { field.media },
+              set: { value in
+                finishEditing()
+                store.updateField(field, ["media": value])
+              })
+          ) {
+            Text("Binary data").tag("binary")
+            Text("Image").tag("image")
+            Text("Video").tag("video")
+            Text("Sound").tag("sound")
+            Text("Document").tag("document")
+          }.disabled(!schemaEditable)
+          Text(
+            "Stored inside the stack, for example a person’s photo. Uniqueness compares the stored bytes."
+          )
+          .font(.caption).foregroundStyle(.secondary)
+        }
+        Button("Delete field", role: .destructive) {
+          finishEditing()
+          store.command("delete_field", ["table": table.id, "id": field.id])
+        }.disabled(!schemaEditable)
+      }
+    }
   }
   private func connectionProperties(_ e: EREdge) -> some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -185,6 +399,7 @@ private struct ERInspector: View {
 
 private struct ERCanvasSurface: View {
   @ObservedObject var store: ERStore
+  @FocusState private var canvasFocused: Bool
   @State private var dragStart: CGPoint?
   @State private var moving: Int?
   @State private var startedConnection = false
@@ -215,7 +430,12 @@ private struct ERCanvasSurface: View {
       VStack(spacing: 0) {
         ScrollView(.horizontal, showsIndicators: false) {
           HStack(spacing: 14) {
-            Button(action: store.addTable) { Label("Table", systemImage: "plus") }
+            Button {
+              store.addTable()
+              #if os(macOS)
+                canvasFocused = true
+              #endif
+            } label: { Label("Table", systemImage: "plus") }
               .buttonStyle(.borderedProminent)
               .accessibilityLabel("Add table")
               .disabled(!store.editable || store.locked)
@@ -275,12 +495,6 @@ private struct ERCanvasSurface: View {
                 Label("Edit", systemImage: "ellipsis").labelStyle(.iconOnly)
               }
               .buttonStyle(.bordered)
-            #else
-              Button("Undo") { store.command("undo") }.disabled(
-                !store.graph.canUndo || !store.editable)
-              Button("Redo") { store.command("redo") }.disabled(
-                !store.graph.canRedo || !store.editable)
-              Button("Paste", action: store.paste).disabled(store.locked || !store.editable)
             #endif
             if store.pendingSource != nil {
               Button("Cancel link") {
@@ -314,6 +528,15 @@ private struct ERCanvasSurface: View {
               #if os(iOS)
                 .overlay(ERCanvasTouchInput(drag: drag, end: end, cancel: cancelDrag, pinch: pinch))
               #else
+                .focusable().focused($canvasFocused)
+                .onAppear { canvasFocused = true }
+                .onDeleteCommand { if store.editable && !store.locked { store.deleteSelection() } }
+                .onCopyCommand(perform: store.table == nil ? nil : { store.clipboardProviders() })
+                .onCutCommand(perform: store.table == nil || !store.editable || store.locked
+                  ? nil : { store.clipboardProviders(cutting: true) })
+                .onPasteCommand(of: ["public.utf8-plain-text"], validator: { _ in
+                  store.editable && !store.locked && store.canPasteTable ? true : nil
+                }, perform: { _ in store.paste() })
                 .gesture(
                   DragGesture(minimumDistance: 0)
                     .onChanged { drag(start: $0.startLocation, location: $0.location) }
@@ -471,10 +694,7 @@ private struct ERCanvasSurface: View {
       let p = screen(CGPoint(x: t.x, y: t.y))
       let rect = CGRect(x: p.x, y: p.y, width: width * scale, height: t.height * scale)
       let selected = t.id == store.selectedTable
-      ctx.fill(Path(roundedRect: rect, cornerRadius: 8 * scale), with: .color(Color(white: 0.97)))
-      ctx.fill(
-        Path(CGRect(x: p.x, y: p.y, width: width * scale, height: 60 * scale)),
-        with: .color(erColor(t.color)))
+      ctx.fill(Path(roundedRect: rect, cornerRadius: 8 * scale), with: .color(erColor(t.color)))
       ctx.stroke(
         Path(roundedRect: rect, cornerRadius: 8 * scale),
         with: .color(selected ? .accentColor : erColor(t.color)), lineWidth: selected ? 3 : 1)
@@ -504,6 +724,10 @@ private struct ERCanvasSurface: View {
     let translation = CGSize(width: location.x - start.x, height: location.y - start.y)
     let p = point(start)
     if dragStart == nil {
+      #if os(macOS)
+        canvasFocused = true
+        store.editingText = false
+      #endif
       store.interruptReveal()
       dragStart = p
       initialView = store.viewport
@@ -534,7 +758,7 @@ private struct ERCanvasSurface: View {
       store.view(v)
     }
   }
-  private func end(start: CGPoint, location: CGPoint) {
+  private func end(start: CGPoint, location: CGPoint, tapCount: Int = 1) {
     guard pinchStart == nil else { return }
     let p = point(location)
     let tapped = hypot(location.x - start.x, location.y - start.y) < 5
@@ -542,13 +766,15 @@ private struct ERCanvasSurface: View {
       if !tapped {
         store.command("move_table", ["id": moving, "x": preview.x, "y": preview.y])
       } else {
-        store.select(table: moving)
+        selectCanvasTable(moving, tapCount: tapCount)
       }
     } else if store.pendingSource != nil {
       if !(startedConnection && tapped) {
         if let target = hitTarget(p) { store.connect(to: target) }
         else { store.pendingSource = nil }
       }
+    } else if tapped, let target = hitTarget(p) {
+      selectCanvasTable(target, tapCount: tapCount)
     } else if tapped {
       var hit: Int?
       for e in store.graph.edges.reversed() {
@@ -579,6 +805,13 @@ private struct ERCanvasSurface: View {
     preview = nil
     dragStart = nil
     linkPreview = nil
+  }
+  private func selectCanvasTable(_ id: Int, tapCount: Int) {
+    #if os(iOS)
+      store.selectTableFromCanvas(id, tapCount: tapCount, compact: true)
+    #else
+      store.selectTableFromCanvas(id, tapCount: tapCount, compact: false)
+    #endif
   }
   private func cancelDrag() {
     store.pendingSource = nil
@@ -697,50 +930,50 @@ private struct ERScrollbar: View {
 #endif
 
 #if os(macOS)
-  struct ERFocusedActions {
-    let store: ERStore
-  }
-  private struct ERActionKey: FocusedValueKey { typealias Value = ERFocusedActions }
-  extension FocusedValues {
-    var erActions: ERFocusedActions? {
-      get { self[ERActionKey.self] }
-      set { self[ERActionKey.self] = newValue }
-    }
-  }
   struct ERCommands: Commands {
-    @FocusedValue(\.erActions) private var actions
+    @FocusedObject private var store: ERStore?
+    private var schemaEditable: Bool { store?.editable == true && store?.locked == false }
+    private var textEditor: NSTextView? {
+      // Observe selection changes as well as focus/drafts for native menu validation.
+      _ = store?.textSelectionVersion
+      // Native Open/Save panels also have text editors, outside the inspector.
+      return NSApp.keyWindow?.firstResponder as? NSTextView
+    }
+    private var textEditing: Bool { textEditor != nil || NSApp.modalWindow != nil }
+    private func textEnabled(_ name: String) -> Bool {
+      let item = NSMenuItem(title: "", action: Selector(name), keyEquivalent: "")
+      guard let target = NSApp.target(forAction: Selector(name)) else { return false }
+      if let validator = target as? NSMenuItemValidation { return validator.validateMenuItem(item) }
+      if let validator = target as? NSUserInterfaceValidations { return validator.validateUserInterfaceItem(item) }
+      return true
+    }
+    private func textAction(_ name: String) { NSApp.sendAction(Selector(name), to: nil, from: nil) }
     var body: some Commands {
-      CommandGroup(replacing: .undoRedo) {
-        Button("Undo model change") { actions?.store.command("undo") }
+      if store != nil {
+        CommandGroup(replacing: .undoRedo) {
+          Button("Undo") {
+            if textEditing { textAction("undo:") } else { store?.command("undo") }
+          }
           .keyboardShortcut("z", modifiers: .command)
-          .disabled(actions?.store.graph.canUndo != true || actions?.store.editable != true)
-        Button("Redo model change") { actions?.store.command("redo") }
+          .disabled(textEditing ? !textEnabled("undo:") : store?.graph.canUndo != true || store?.editable != true)
+          Button("Redo") {
+            if textEditing { textAction("redo:") } else { store?.command("redo") }
+          }
           .keyboardShortcut("z", modifiers: [.command, .shift])
-          .disabled(actions?.store.graph.canRedo != true || actions?.store.editable != true)
+          .disabled(textEditing ? !textEnabled("redo:") : store?.graph.canRedo != true || store?.editable != true)
+        }
+      }
+      CommandGroup(after: .pasteboard) {
+        Divider()
+        Button("Duplicate") { store?.duplicate() }
+          .keyboardShortcut("d", modifiers: .command)
+          .disabled(!schemaEditable || store?.table == nil)
+
       }
       CommandMenu("Model") {
-        Button("Add table") { actions?.store.addTable() }.keyboardShortcut(
-          "t", modifiers: [.command, .shift]
-        )
-        .disabled(actions?.store.editable != true || actions?.store.locked != false)
-        Button("Copy table") { actions?.store.copy() }.keyboardShortcut(
-          "c", modifiers: [.command, .shift]
-        )
-        .disabled(actions?.store.table == nil)
-        Button("Paste table") { actions?.store.paste() }.keyboardShortcut(
-          "v", modifiers: [.command, .shift]
-        )
-        .disabled(actions?.store.editable != true || actions?.store.locked != false)
-        Button("Duplicate table") { actions?.store.duplicate() }.keyboardShortcut(
-          "d", modifiers: .command
-        )
-        .disabled(
-          actions?.store.table == nil || actions?.store.editable != true
-            || actions?.store.locked != false)
-        Button("Delete selected object") { actions?.store.deleteSelection() }
-          .disabled(
-            (actions?.store.table == nil && actions?.store.edge == nil)
-              || actions?.store.editable != true || actions?.store.locked != false)
+        Button("Add table") { store?.addTable() }
+          .keyboardShortcut("t", modifiers: [.command, .shift])
+          .disabled(!schemaEditable)
       }
     }
   }
