@@ -21,7 +21,7 @@ struct ERTable: Codable, Identifiable {
   var x: Double
   var y: Double
   var fields: [ERField]
-  var height: Double { 64 + Double(fields.count) * 32 }
+  var height: Double { 64 }
 }
 struct EREdge: Codable, Identifiable {
   var id: Int
@@ -31,6 +31,9 @@ struct EREdge: Codable, Identifiable {
   var targetField: Int
   var many: Bool
   var cascade: Bool
+  // Older documents store foreign-key direction; present their conceptual direction.
+  var sourceTable: Int { field == 0 ? table : target }
+  var destinationTable: Int { field == 0 ? target : table }
 }
 struct ERGraph: Decodable {
   var tables: [ERTable] = []
@@ -45,15 +48,15 @@ final class ERStore: ObservableObject {
   @Published var graph = ERGraph()
   @Published var selectedTable: Int?
   @Published var selectedEdge: Int?
-  @Published var selectedField: Int?
+  @Published var pendingSource: Int?
   @Published var tableNameDraft = ""
-  @Published var fieldNameDraft = ""
   private var tableNameBaseline = ""
-  private var fieldNameBaseline = ""
-  var hasDraft: Bool { tableNameDraft != tableNameBaseline || fieldNameDraft != fieldNameBaseline }
-  var field: ERField? { table?.fields.first { $0.id == selectedField } }
+  var hasDraft: Bool { tableNameDraft != tableNameBaseline }
   @Published var error: String?
   @Published var showDetails = false
+  @Published private(set) var animatedViewport: ERViewport?
+  private var revealTask: Task<Void, Never>?
+  var viewport: ERViewport { animatedViewport ?? graph.view }
   var canvasSize = CGSize.zero
   var document: OpaquePointer?
   var didChange: (() -> Void)?
@@ -63,13 +66,12 @@ final class ERStore: ObservableObject {
   var edge: EREdge? { graph.edges.first { $0.id == selectedEdge } }
   func attach(_ pointer: OpaquePointer, changed: @escaping () -> Void) {
     if document != pointer {
+      cancelReveal()
       selectedTable = nil
       selectedEdge = nil
-      selectedField = nil
+      pendingSource = nil
       tableNameDraft = ""
-      fieldNameDraft = ""
       tableNameBaseline = ""
-      fieldNameBaseline = ""
       showDetails = false
     }
     document = pointer
@@ -83,15 +85,12 @@ final class ERStore: ObservableObject {
     } catch { self.error = error.localizedDescription }
     if !graph.tables.contains(where: { $0.id == selectedTable }) { selectedTable = nil }
     if !graph.edges.contains(where: { $0.id == selectedEdge }) { selectedEdge = nil }
-    if field == nil { selectedField = nil }
-    if let selectedField { selectedEdge = graph.edges.first { $0.field == selectedField }?.id }
+    if !editable || locked || !graph.tables.contains(where: { $0.id == pendingSource }) {
+      pendingSource = nil
+    }
     if tableNameDraft == tableNameBaseline || table == nil {
       tableNameDraft = table?.name ?? ""
       tableNameBaseline = tableNameDraft
-    }
-    if fieldNameDraft == fieldNameBaseline || field == nil {
-      fieldNameDraft = field?.name ?? ""
-      fieldNameBaseline = fieldNameDraft
     }
   }
   // Drafts belong to the current selection. All model actions and document
@@ -103,15 +102,10 @@ final class ERStore: ObservableObject {
       tableNameDraft = table?.name ?? ""
       tableNameBaseline = tableNameDraft
     }
-    if let t = table, let f = field, fieldNameDraft != fieldNameBaseline {
-      let name = fieldNameDraft
-      execute("update_index", ["table": t.id, "id": f.id, "name": name])
-      fieldNameDraft = field?.name ?? ""
-      fieldNameBaseline = fieldNameDraft
-    }
   }
   func command(_ op: String, _ properties: [String: Any] = [:]) {
     commitNames()
+    cancelReveal()
     execute(op, properties)
   }
   private func execute(_ op: String, _ properties: [String: Any]) {
@@ -128,37 +122,36 @@ final class ERStore: ObservableObject {
     refresh()
     didChange?()
   }
-  func select(table: Int? = nil, edge: Int? = nil, field: Int? = nil, details: Bool = true) {
+  func select(table: Int? = nil, edge: Int? = nil, details: Bool = true) {
     commitNames()
-    let connection = graph.edges.first { $0.id == edge }
-    selectedTable = table ?? connection?.table
-    selectedField = field ?? connection?.field
-    selectedEdge = edge ?? graph.edges.first { $0.field == selectedField }?.id
+    selectedTable = table
+    selectedEdge = edge
     tableNameDraft = self.table?.name ?? ""
     tableNameBaseline = tableNameDraft
-    fieldNameDraft = self.field?.name ?? ""
-    fieldNameBaseline = fieldNameDraft
     #if os(iOS)
-      if details && selectedTable != nil { showDetails = true }
+      if details && (selectedTable != nil || selectedEdge != nil) { showDetails = true }
     #endif
   }
-  func addField(_ kind: String, details: Bool = true) {
+  func beginConnection() {
     commitNames()
-    guard let t = table else { return }
-    let label = kind == "index" ? "Index" : "Connection"
-    var n = 1
-    while t.fields.contains(where: { $0.name.lowercased() == "\(label) \(n)".lowercased() }) { n += 1 }
-    command("add_index", ["table": t.id, "name": "\(label) \(n)", "kind": kind])
-    select(table: t.id, field: table?.fields.last?.id, details: details)
+    guard editable, !locked, let selectedTable else { return }
+    pendingSource = selectedTable
   }
-  func destination(_ e: EREdge) -> String {
-    guard let target = graph.tables.first(where: { $0.id == e.target }) else { return "" }
-    let key =
-      e.targetField == 0
-      ? "id (primary key)" : target.fields.first { $0.id == e.targetField }?.name ?? ""
-    return "\(target.name) → \(key)"
+  func connect(to target: Int) {
+    guard let source = pendingSource else { return }
+    let count = graph.edges.count
+    command("add_connection", ["table": source, "target": target])
+    pendingSource = nil
+    if graph.edges.count == count + 1 { select(edge: graph.edges.last?.id) }
+  }
+  func tableName(_ id: Int) -> String { graph.tables.first { $0.id == id }?.name ?? "" }
+  func relationshipTitle(_ e: EREdge) -> String {
+    let source = tableName(e.sourceTable)
+    let target = tableName(e.destinationTable)
+    return "\(source) → \(target)"
   }
   func addTable() {
+    let start = viewport
     commitNames()
     let count = graph.tables.count
     var n = count + 1
@@ -172,7 +165,9 @@ final class ERStore: ObservableObject {
       ])
     guard graph.tables.count == count + 1, let added = graph.tables.last else { return }
     select(table: added.id, details: false)
-    view(graph.view.revealing(CGRect(x: added.x, y: added.y, width: 320, height: added.height), in: canvasSize))
+    let target = graph.view.revealing(CGRect(x: added.x, y: added.y, width: 320, height: added.height), in: canvasSize)
+    view(target)
+    animateReveal(from: start, to: graph.view)
   }
   func updateTable(_ t: ERTable, name: String? = nil, color: String? = nil) {
     commitNames()
@@ -231,6 +226,30 @@ final class ERStore: ObservableObject {
       command("delete_table", ["id": selectedTable])
     }
   }
+  func cancelReveal() {
+    revealTask?.cancel()
+    revealTask = nil
+    animatedViewport = nil
+  }
+  func interruptReveal() {
+    guard let current = animatedViewport else { return }
+    view(current)
+  }
+  private func animateReveal(from start: ERViewport, to target: ERViewport) {
+    guard start.panX != target.panX || start.panY != target.panY else { return }
+    animatedViewport = start
+    let began = ProcessInfo.processInfo.systemUptime
+    revealTask = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        let progress = (ProcessInfo.processInfo.systemUptime - began) / 0.5
+        guard progress < 1 else { break }
+        self?.animatedViewport = start.panned(toward: target, progress: progress)
+        do { try await Task.sleep(nanoseconds: 16_666_667) }
+        catch { return }
+      }
+      if !Task.isCancelled { self?.animatedViewport = nil }
+    }
+  }
   func view(_ v: ERViewport) {
     command(
       "view",
@@ -240,7 +259,7 @@ final class ERStore: ObservableObject {
       ])
   }
   func zoom(_ factor: Double) {
-    var v = graph.view
+    var v = viewport
     v.zoom = min(4, max(0.0001, v.zoom * factor))
     view(v)
   }

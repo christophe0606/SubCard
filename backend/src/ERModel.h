@@ -7,6 +7,8 @@
 namespace subcard {
 struct ERField { int id; std::string name, kind; bool unique = true; };
 struct ERTable { int id; std::string name, color; double x, y; std::vector<ERField> fields; };
+// field == 0: conceptual table -> target relationship; generated target.r<ID> references table.id.
+// field != 0: legacy foreign-key edge, retained without rewriting existing data.
 struct EREdge { int id, table, field, target, targetField; bool many = true, cascade = false; };
 struct ERGraph { std::vector<ERTable> tables; std::vector<EREdge> edges; };
 struct ERChange { ERGraph before, after; bool schema; };

@@ -44,3 +44,15 @@ struct ERViewport: Codable {
     zoom < 0.01 ? String(format: "%.2f%%", zoom * 100) : "\(Int((zoom * 100).rounded()))%"
   }
 }
+
+extension ERViewport {
+  /// Presentation-only camera motion. The document already contains the final view.
+  func panned(toward target: ERViewport, progress: Double) -> ERViewport {
+    let t = min(1, max(0, progress))
+    let eased = t * t * (3 - 2 * t)
+    var result = target
+    result.panX = panX + (target.panX - panX) * eased
+    result.panY = panY + (target.panY - panY) * eased
+    return result
+  }
+}

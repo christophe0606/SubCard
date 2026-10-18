@@ -1,6 +1,6 @@
 # Entity relationship canvas
 
-## Implementation plan and acceptance checks
+## Original implementation plan and acceptance checks (historical)
 
 1. [x] Add a shared, versioned ER model and a validated JSON command boundary in C++.
    Generate SQLite user tables, indexed fields and foreign keys from it.
@@ -27,24 +27,60 @@ Both are included in document backups and platform file snapshots. Old greeting
 only documents acquire defaults in memory. No automatic interpretation of legacy
 raw SQL schemas is attempted: replacing an existing non-ER schema is rejected.
 
-Physical SQL names use stable IDs (`user_t<ID>`, `f<ID>`) independently of editable
-labels. Every table has `id INTEGER PRIMARY KEY AUTOINCREMENT`. Indexed fields
-are integer fields with a persisted `unique` option. New indexes default to unique,
-preserving the original behavior; unchecking **Unique** generates a normal secondary
-index that permits duplicate values. SQLite UNIQUE permits multiple NULL values.
-Only unique indexes and the primary key may be foreign-key destinations. An index
-with incoming connections must stay unique until those connections are disconnected.
+## Table relationships (2026-10-18)
 
-The UI labels referencing fields **Connection (foreign key)**. These are nullable
-integer fields with a right port; indexed fields have a left port and the primary
-key port is in the header. Connections start unbound: adding a field does not add
-an edge or an SQL REFERENCES constraint. The internal `secondary` field kind is
-retained for document/command compatibility; it means a foreign-key field, not a
-secondary index. Ordinary data fields are deferred.
-A right-to-left arrow points from the referencing table to the referenced key.
-`1:N` means one target can be referenced by many source rows; `1:1` adds UNIQUE
-to the source key. Deletion blocks by default; cascade deletes referring rows
-when the target row is deleted. Self references and cycles are allowed.
+The current editor exposes tables and arrows. An arrow **A → B** means **A has
+one B (1:1)** or **A has many B (1:N)**. The arrow direction describes the user's
+model. It does not describe the direction of a SQL reference.
+
+Create an arrow by dragging a table's right circle onto another table (including
+its left circle), or select a table, choose **Relationship / Create relationship**,
+and click/tap the destination. Tapping the right circle also arms the source for
+a subsequent destination tap, including on iPhone. Cancel abandons the pending
+arrow without creating a field or consuming an undo step. New arrows default
+to 1:N and are selected after creation. Select the line or cardinality label to
+change between 1:1 and 1:N in the inspector. Switching cardinality keeps the same
+arrow ID, direction and endpoints. Both choices remain editable throughout schema
+design, subject to the existing schema lock and fake-data protections below.
+
+Table cards display names and table-level relationship handles. The current UI
+contains no key fields, field-key ports, index editor, Unique toggle or SQL key
+names. Indexes on ordinary data fields remain future work. Parallel relationships
+have separate routes, and self references and cycles remain supported.
+
+Physical SQL names use stable IDs independently of editable labels. Every table
+has a hidden `id INTEGER PRIMARY KEY AUTOINCREMENT`. A new relationship with ID E
+from A to B generates a hidden nullable `r<E> INTEGER REFERENCES user_t<A>(id)`
+column in **B**. For 1:N, the backend generates `user_r<E>` on that column. For
+1:1, `UNIQUE` supplies both enforcement and an SQLite index; a redundant secondary
+index is unnecessary. The parent primary key is indexed by SQLite. Regression
+checks inspect the query plan to verify indexed access on both sides of a join.
+
+Keys are optional references: 1:1 means at most one matching B for each A, and
+multiple unassigned B rows may have NULL references. Mandatory participation is
+not a separate editor concept in this version. Deletion blocks by default; the
+1:N cascade option deletes related B rows when their A row is deleted. Removing
+an arrow removes its generated key and index. Undo restores the entire change.
+Duplicating/copying a table does not copy its relationships or generated keys.
+
+### Existing documents and versioning
+
+Graph metadata and snapshots now use **version 2**. The loader also accepts
+version 1. The version bump prevents older binaries from silently interpreting
+table arrows as field-based foreign keys.
+
+Existing field-based keys, indexes, constraints and rows are preserved. Their
+metadata still uses `index` / `secondary` field kinds and nonzero edge `field`
+IDs. Both frontends hide these fields and display each legacy arrow in the
+conceptual direction: its referenced table → its referencing table. This only
+changes presentation; opening or cosmetically editing an old document never
+reverses a stored foreign key or rebuilds real data. Legacy commands remain at
+the backend boundary for compatibility, without UI controls. Editing an old
+arrow's cardinality continues to apply to its existing physical key.
+
+New arrows have `field: 0`, `targetField: 0`, `table: A`, and `target: B` in the
+shared graph; these markers distinguish them from legacy edges. Generated keys
+are derived directly from edges and never added to the graph's field list.
 
 Editing a schema requires edit mode and an unlocked document. Existing fake data
 must be explicitly discarded before schema commands, avoiding silent data loss.
@@ -106,7 +142,7 @@ backend/viewport regression suite. It was development-signed and installed on th
 connected iPhone. Automatic launch was blocked by the device lock; the user chose
 to open SubCard manually for the next physical interaction test.
 
-## Field editor refinement plan and acceptance checks
+## Previous field editor refinement (historical; superseded by table relationships)
 
 1. [x] Replace separate creation/rename/connect forms with one selectable field
    list and an extensible **Add field** menu (Index / Connection). Keep the
@@ -139,16 +175,19 @@ cardinality and deletion policy. A rejected edit is atomic and consumes no histo
 Unique changes are schema operations, so fake-data and real-data protections apply.
 Name-only edits keep stable physical SQL names and do not rebuild tables.
 
-## Command contract (version 1)
+## Command contract (version 2; version 1 remains readable)
 
 Commands have an `op` string and relevant properties. IDs are positive integers;
 `targetField: 0` means the header primary key. Commands:
 `add_table` (name,x,y), `update_table` (id,name,color), `move_table` (id,x,y),
-`delete_table` (id), `paste_table` (table), `add_index` (table,name,kind,unique?),
+`delete_table` (id), `paste_table` (table),
+`add_connection` (table,target,many?; defaults to 1:N),
+`update_connection` (id,many,cascade), `delete_connection` (id),
+`undo`, `redo`, and `view` (zoom,panX,panY,calibration).
+Legacy compatibility commands: `add_index` (table,name,kind,unique?),
 `update_index` (table,id,name,unique?), `delete_index` (table,id),
-`connect` (table,field,target,targetField), `update_connection` (id,many,cascade),
-`delete_connection` (id), `undo`, `redo`, and `view` (zoom,panX,panY,calibration).
-Kinds are `index` and `secondary` (Connection/foreign key in the UI). `unique` is
+`connect` (table,field,target,targetField).
+Legacy kinds are `index` and `secondary`; neither is displayed in the current UI. `unique` is
 boolean, defaults to true for omitted properties in older files/creation commands,
 and can only be changed for indexes. A name-only update preserves uniqueness.
 Graph field and edge IDs are globally unique.
@@ -171,7 +210,7 @@ A native SwiftUI check at 200% with a narrow canvas confirms repeated Add Table
 actions follow the newest table and leave its header visible. The update was
 installed on the connected iPhone with `--no-launch` for the user's manual test.
 
-## Verification results
+## Earlier verification results (before table-only relationships)
 
 Verified on macOS on 2026-10-18:
 
@@ -238,7 +277,7 @@ the project's current Mac test scope. The geometry and GPUI editor introduce no
 Mac-only dependencies. Physical 1 cm calibration requires a ruler on the actual
 display; font em size is not the same measurement as visible glyph ink.
 
-### Manual regression procedure
+### Earlier manual regression procedure (historical)
 
 1. Create two tables, add a unique index and a connection field, and drag the right
    port onto the other table's primary/index port. Select the arrow and switch
@@ -269,3 +308,82 @@ Mac Model-menu shortcuts: Shift-Command-T adds a table, Shift-Command-C/V copies
 and pastes tables, Command-D duplicates, and Command-Z/Shift-Command-Z undo/redo.
 GPUI uses platform Copy/Paste and Undo/Redo shortcuts when the canvas is focused;
 Delete/Backspace removes the selection. Text inputs keep their own shortcuts.
+
+## Table relationship acceptance checks
+
+- Backend regressions cover A → B generating its hidden reference in B, automatic
+  nonunique/unique indexes, query-plan index use, foreign-key rejection, optional
+  references, cardinality changes, undo/redo, deletion cleanup, cascade/block,
+  parallel/self/cyclic arrows, save/reopen, transaction rollback, fake-data
+  protections, real-data locks and version-1 real-data preservation.
+- The real SwiftUI editor store checks creation without visible fields, source
+  selection without a model mutation, arrow-only selection, cardinality undo/redo,
+  deletion/restore, invalid destinations, duplicate isolation, name-draft commits,
+  hidden legacy keys and conceptual legacy-arrow direction.
+- GPUI tests cover conceptual/legacy direction, hidden-key table height, parallel
+  routes and self-loop geometry, plus the existing viewport regression cases.
+
+Manual desktop/iPhone procedure: create A and B; drag A's right circle onto B;
+select the 1:N label; change it to 1:1 and back; verify undo/redo and deletion.
+Repeat using Relationship followed by a destination tap, and with a self arrow.
+Save and reopen across frontends. Old documents must show table arrows without
+keys/index controls and preserve existing rows. iPhone touch interactions require
+a physical-device acceptance check; compilation alone does not verify gestures.
+
+Verified on macOS on 2026-10-18 for the table-relationship update:
+
+- `./scripts/test.sh` passes all backend, document, Swift viewport and real editor
+  store suites. It also verifies bundle signatures and system runtime dependencies.
+- GPUI `cargo test --locked --manifest-path apps/gpui/Cargo.toml` passes all three
+  viewport/relationship tests after sourcing `scripts/environment.sh` in Bash.
+- `./scripts/build.sh all` builds and signs both Mac apps.
+- `./scripts/build-iphone.sh` builds the unsigned arm64 app and verifies the
+  packaged and Mach-O iOS 16.0 minimum and system-only runtime dependencies.
+- Native SwiftUI checks verify table naming, direct A → B dragging, table-only
+  presentation, arrow-label selection, 1:N/1:1 changes and keyboard undo.
+- Native GPUI checks verify table-only presentation, toolbar relationship
+  creation, arrow/label selection, cardinality changes and keyboard undo.
+  A SwiftUI-created document reopens in GPUI, and GPUI's changed cardinality
+  persists across reopening. The low-zoom label remains readable above its arrow.
+
+Build/cache/test output stays inside `.build/` on the external drive. Existing
+SDK deprecation and Rust dependency future-compatibility warnings remain.
+This update was not installed or touch-tested on the physical iPhone. Linux and
+Windows remain outside the current runtime test scope.
+
+
+## Table-only destinations and animated reveal (2026-10-18)
+
+Relationship details explicitly show **From: table name** and **To: table name**
+in SwiftUI and GPUI. Destination keys, primary-key descriptions and physical SQL
+column names are never part of those labels, including for older documents.
+
+When **+ Table** changes the camera position, both frontends ease the pan over
+0.5 seconds. The existing table and background move across the canvas so a new
+table appearing in the same screen position is visibly a different canvas location.
+Zoom and calibration stay fixed. Adding a table that already fits does not pan.
+Repeated additions start from the currently displayed camera position. Pointer,
+touch and wheel navigation can interrupt the reveal and continue from that position.
+
+The final viewport is committed once through the shared command boundary before
+the display animation starts. Animation frames are transient frontend state:
+SwiftUI updates a presentation camera on the main actor; GPUI requests display
+frames and samples a monotonic clock. Drawing, handles, scrollbars and hit testing
+use that presentation camera. No animation frame writes to SQLite or consumes
+undo history. Saving during the move persists the final camera, and animation
+frames cannot make the saved document dirty. Replacing a document cancels the old
+animation. Undo still removes a newly created table in one step.
+
+Verification: backend/Swift editor/viewport suites and four GPUI tests pass;
+both Mac builds and the unsigned iOS 16 build pass. The real SwiftUI store test
+checks intermediate motion, repeated-add continuity, completion, gesture
+interruption, save-during-animation and one-step undo. Native checks in both Mac frontends
+confirm table-only From/To labels and Add Table behavior, including the GPUI
+third-table reveal. GPUI schedules subsequent frames from rendering. The paired
+physical iPhone was disconnected, so its installed app was not refreshed.
+
+After the iPhone was reconnected on 2026-10-18, a live device-details check
+confirmed the paired wired connection and developer services. The latest app was
+rebuilt, development-signed, verified for iOS 16.0 and installed successfully on
+the iPhone 12 Pro Max using `run-iphone.sh --no-launch`. The user will open it
+manually to test the table-only connection details and animated table reveal.

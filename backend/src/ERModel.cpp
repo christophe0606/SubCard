@@ -118,7 +118,7 @@ std::string quote(sqlite3 *db, const std::string &s) {
 std::string num(double n) { return std::to_string(n); }
 std::string num(int n) { return std::to_string(n); }
 std::string graph_json(sqlite3 *db, const ERGraph &g) {
-    std::string s = "{\"version\":1,\"tables\":[";
+    std::string s = "{\"version\":2,\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -156,13 +156,15 @@ ERTable table_from(const JSON &j) {
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") == 1, "Unsupported ER model version.");
+    require(j.id("version") == 1 || j.id("version") == 2, "Unsupported ER model version.");
     ERGraph g;
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
-    for (auto &e : j.array("edges"))
+    for (auto &e : j.array("edges")) {
+        require(j.id("version") == 2 || e.id("field") != 0, "Version-1 edges require a foreign-key field.");
         g.edges.push_back({e.id("id"), e.id("table"), e.id("field"), e.id("target"), e.id("targetField"),
                            e.boolean("many"), e.boolean("cascade")});
+    }
     return g;
 }
 ERTable &table(ERGraph &g, int id) {
@@ -227,6 +229,13 @@ int validate(ERGraph &g) {
     std::set<int> connected;
     for (auto &e : g.edges) {
         id(e.id);
+        if (e.field == 0) {
+            table(g, e.table);
+            table(g, e.target);
+            require(e.targetField == 0, "Table relationships cannot name a destination key.");
+            require(e.many || !e.cascade, "Cascade applies only to one-to-many connections.");
+            continue;
+        }
         auto &source = field(table(g, e.table), e.field);
         auto &target = table(g, e.target);
         require(source.kind == "secondary", "Connections must start at a foreign-key field.");
@@ -254,7 +263,18 @@ std::string schema(const ERGraph &g) {
                            (e.cascade ? "CASCADE" : "RESTRICT");
                 }
         }
+        // A -> B means A has one/many B. The hidden reference belongs to B.
+        for (const auto &e : g.edges)
+            if (e.field == 0 && e.target == t.id) {
+                sql += ",r" + num(e.id) + " INTEGER" + (e.many ? "" : " UNIQUE") +
+                       " REFERENCES user_t" + num(e.table) + "(id) ON DELETE " +
+                       (e.cascade ? "CASCADE" : "RESTRICT");
+            }
         sql += ") STRICT;";
+        for (const auto &e : g.edges)
+            if (e.field == 0 && e.target == t.id && e.many)
+                sql += "CREATE INDEX user_r" + num(e.id) + " ON user_t" + num(t.id) +
+                       "(r" + num(e.id) + ");";
         for (const auto &f : t.fields)
             if (f.kind == "secondary" || !f.unique)
                 sql += "CREATE INDEX user_i" + std::to_string(f.id) + " ON user_t" + std::to_string(t.id) +
@@ -276,7 +296,7 @@ void initialize_er(sqlite3 *db, ERModel &m) {
     exec(db, "CREATE TABLE IF NOT EXISTS subcard_system_er_model(id INTEGER PRIMARY KEY CHECK(id=1),json "
              "TEXT NOT NULL) STRICT;"
              "INSERT OR IGNORE INTO subcard_system_er_model "
-             "VALUES(1,'{\"version\":1,\"tables\":[],\"edges\":[]}');"
+             "VALUES(1,'{\"version\":2,\"tables\":[],\"edges\":[]}');"
              "CREATE TABLE IF NOT EXISTS subcard_system_er_view(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT "
              "NOT NULL) STRICT;"
              "INSERT OR IGNORE INTO subcard_system_er_view "
@@ -412,8 +432,12 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(),
                                      [&](auto &e) { return e.field == id || e.targetField == id; }),
                       g.edges.end());
+    } else if (op == "add_connection") {
+        g.edges.push_back({next++, j.id("table"), 0, j.id("target"), 0,
+                           j.type("many").empty() ? true : j.boolean("many"), false});
     } else if (op == "connect") {
         const int sourceTable = j.id("table"), sourceField = j.id("field");
+        require(sourceField != 0, "Legacy connections require a foreign-key field.");
         auto found = std::find_if(g.edges.begin(), g.edges.end(), [&](const auto &e) {
             return e.table == sourceTable && e.field == sourceField;
         });

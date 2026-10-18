@@ -366,7 +366,7 @@ impl Render for SubCardView {
                     )
                     .when(self.document.schema_locked(), |d| d.child("Schema locked")),
             )
-            .child(self.er_render(cx))
+            .child(self.er_render(window, cx))
             .when_some(self.error.clone(), |d, error| {
                 d.child(div().p_2().text_color(rgb(0xb00020)).child(error))
             })

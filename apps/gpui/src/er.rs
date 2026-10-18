@@ -3,7 +3,7 @@ use crate::{SubCardView, text_input::TextInput};
 use gpui::{prelude::*, *};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, time::Instant};
 
 fn default_unique() -> bool {
     true
@@ -28,7 +28,7 @@ pub struct Table {
 }
 impl Table {
     fn height(&self) -> f64 {
-        64. + self.fields.len() as f64 * 32.
+        64.
     }
 }
 #[derive(Clone, Deserialize)]
@@ -37,10 +37,24 @@ pub struct Edge {
     pub table: i32,
     pub field: i32,
     pub target: i32,
-    #[serde(rename = "targetField")]
-    pub target_field: i32,
     pub many: bool,
     pub cascade: bool,
+}
+impl Edge {
+    fn source_table(&self) -> i32 {
+        if self.field == 0 {
+            self.table
+        } else {
+            self.target
+        }
+    }
+    fn destination_table(&self) -> i32 {
+        if self.field == 0 {
+            self.target
+        } else {
+            self.table
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +75,14 @@ impl Default for Viewport {
     }
 }
 impl Viewport {
+    fn panned(&self, target: &Self, progress: f64) -> Self {
+        let t = progress.clamp(0., 1.);
+        let eased = t * t * (3. - 2. * t);
+        let mut result = target.clone();
+        result.pan_x = self.pan_x + (target.pan_x - self.pan_x) * eased;
+        result.pan_y = self.pan_y + (target.pan_y - self.pan_y) * eased;
+        result
+    }
     fn revealing_table(&self, table: &Table, width: f64, height: f64) -> Self {
         if width <= 0. || height <= 0. {
             return self.clone();
@@ -99,19 +121,22 @@ enum Drag {
     Horizontal,
     Vertical,
 }
+struct Reveal {
+    from: Viewport,
+    to: Viewport,
+    began: Instant,
+}
 pub struct ERState {
     pub graph: Graph,
+    reveal: Option<Reveal>,
     pub selected: Option<i32>,
     pub edge: Option<i32>,
     pub focus: FocusHandle,
     pub name: Entity<TextInput>,
-    pub field: Entity<TextInput>,
-    editing_field: Option<i32>,
-    field_menu: bool,
     name_baseline: String,
-    field_baseline: String,
     _subscriptions: Vec<Subscription>,
-    pending: Option<(i32, i32)>,
+    pending: Option<i32>,
+    link_start: Option<(f64, f64)>,
     drag: Option<Drag>,
     preview: Option<(i32, f64, f64)>,
     link_preview: Option<(f64, f64)>,
@@ -122,9 +147,8 @@ pub struct ERState {
 impl ERState {
     pub fn new(window: &mut Window, cx: &mut Context<SubCardView>) -> Self {
         let name = cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Table name"));
-        let field = cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Field name"));
         let mut subscriptions = Vec::new();
-        for input in [&name, &field] {
+        for input in [&name] {
             subscriptions.push(cx.on_blur(&input.focus_handle(cx), window, |s, _, cx| {
                 s.er_commit_names(cx)
             }));
@@ -140,17 +164,15 @@ impl ERState {
         }
         Self {
             graph: Graph::default(),
+            reveal: None,
             selected: None,
             edge: None,
             focus: cx.focus_handle(),
             name,
-            field,
             _subscriptions: subscriptions,
             name_baseline: String::new(),
-            field_baseline: String::new(),
-            editing_field: None,
-            field_menu: false,
             pending: None,
+            link_start: None,
             drag: None,
             preview: None,
             link_preview: None,
@@ -159,36 +181,30 @@ impl ERState {
             resizing: false,
         }
     }
+    fn viewport(&self) -> Viewport {
+        self.reveal
+            .as_ref()
+            .map(|r| r.from.panned(&r.to, r.began.elapsed().as_secs_f64() / 0.5))
+            .unwrap_or_else(|| self.graph.view.clone())
+    }
     fn scale(&self) -> f64 {
         self.graph.view.zoom * self.graph.view.calibration
     }
     fn position(&self, p: Point<Pixels>) -> (f64, f64) {
         let b = self.bounds.get();
         (
-            f64::from(p.x - b.origin.x) / self.scale() + self.graph.view.pan_x,
-            f64::from(p.y - b.origin.y) / self.scale() + self.graph.view.pan_y,
+            f64::from(p.x - b.origin.x) / self.scale() + self.viewport().pan_x,
+            f64::from(p.y - b.origin.y) / self.scale() + self.viewport().pan_y,
         )
     }
-    fn target(&self, p: (f64, f64)) -> Option<(i32, i32)> {
-        if let Some(port) = self.port(p, false) {
-            return Some(port);
-        }
-        for t in self.tables().iter().rev() {
-            if p.0 < t.x || p.0 > t.x + 320. {
-                continue;
-            }
-            if p.1 >= t.y && p.1 < t.y + 60. {
-                return Some((t.id, 0));
-            }
-            let row = ((p.1 - t.y - 64.) / 32.).floor() as isize;
-            if row >= 0 && (row as usize) < t.fields.len() {
-                let f = &t.fields[row as usize];
-                if f.kind == "index" && f.unique {
-                    return Some((t.id, f.id));
-                }
-            }
-        }
-        None
+    fn target(&self, p: (f64, f64)) -> Option<i32> {
+        self.port(p, false).or_else(|| {
+            self.tables()
+                .iter()
+                .rev()
+                .find(|t| p.0 >= t.x && p.0 <= t.x + 320. && p.1 >= t.y && p.1 <= t.y + t.height())
+                .map(|t| t.id)
+        })
     }
     fn tables(&self) -> Vec<Table> {
         self.graph
@@ -216,53 +232,43 @@ impl ERState {
             |(w, h), t| (w.max(t.x + 400.), h.max(t.y + t.height() + 80.)),
         )
     }
-    fn port(&self, p: (f64, f64), right: bool) -> Option<(i32, i32)> {
-        for t in self.tables().iter().rev() {
-            if !right {
-                let q = port(t, 0, false);
-                if distance(p, q) < 12_f64.max(14. / self.scale()) {
-                    return Some((t.id, 0));
-                }
-            }
-            for f in &t.fields {
-                if (f.kind == "secondary") == right && (right || f.unique) {
-                    let q = port(t, f.id, right);
-                    if distance(p, q) < 12_f64.max(14. / self.scale()) {
-                        return Some((t.id, f.id));
-                    }
-                }
-            }
-        }
-        None
+    fn port(&self, p: (f64, f64), right: bool) -> Option<i32> {
+        self.tables()
+            .iter()
+            .rev()
+            .find(|t| distance(p, port(t, right)) < 12_f64.max(14. / self.scale()))
+            .map(|t| t.id)
     }
 }
+
 fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
-fn port(t: &Table, f: i32, right: bool) -> (f64, f64) {
-    (
-        t.x + if right { 320. } else { 0. },
-        t.y + if f == 0 {
-            30.
-        } else {
-            80. + t.fields.iter().position(|v| v.id == f).unwrap_or(0) as f64 * 32.
-        },
-    )
+fn port(t: &Table, right: bool) -> (f64, f64) {
+    (t.x + if right { 320. } else { 0. }, t.y + 30.)
 }
-fn route(g: &[Table], e: &Edge) -> Vec<(f64, f64)> {
-    let Some(a) = g.iter().find(|t| t.id == e.table) else {
+fn route(g: &[Table], e: &Edge, edges: &[Edge]) -> Vec<(f64, f64)> {
+    let Some(a) = g.iter().find(|t| t.id == e.source_table()) else {
         return vec![];
     };
-    let Some(b) = g.iter().find(|t| t.id == e.target) else {
+    let Some(b) = g.iter().find(|t| t.id == e.destination_table()) else {
         return vec![];
     };
-    let p = port(a, e.field, true);
-    let q = port(b, e.target_field, false);
-    if q.0 > p.0 + 50. {
+    let p = port(a, true);
+    let q = port(b, false);
+    let lane = edges
+        .iter()
+        .filter(|other| {
+            other.source_table() == e.source_table()
+                && other.destination_table() == e.destination_table()
+        })
+        .position(|other| other.id == e.id)
+        .unwrap_or(0) as f64;
+    if q.0 > p.0 + 50. && lane == 0. {
         let mid = (p.0 + q.0) / 2.;
         vec![p, (mid, p.1), (mid, q.1), q]
     } else {
-        let bottom = (a.y + a.height()).max(b.y + b.height()) + 40.;
+        let bottom = (a.y + a.height()).max(b.y + b.height()) + 40. + lane * 24.;
         vec![
             p,
             (p.0 + 30., p.1),
@@ -272,6 +278,17 @@ fn route(g: &[Table], e: &Edge) -> Vec<(f64, f64)> {
             q,
         ]
     }
+}
+fn label_position(points: &[(f64, f64)], scale: f64) -> Option<(f64, f64)> {
+    points
+        .windows(2)
+        .max_by(|a, b| distance(a[0], a[1]).total_cmp(&distance(b[0], b[1])))
+        .map(|s| {
+            (
+                (s[0].0 + s[1].0) / 2. - 10_f64.max(10. / scale),
+                (s[0].1 + s[1].1) / 2. - 24_f64.max(24. / scale),
+            )
+        })
 }
 fn segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -336,43 +353,34 @@ impl SubCardView {
         {
             self.er.edge = None;
         }
-        if let Some(field) = self.er.editing_field {
-            self.er.edge = self
+        if self.document.schema_locked()
+            || self.document.using_document()
+            || !self
                 .er
                 .graph
-                .edges
+                .tables
                 .iter()
-                .find(|e| e.field == field)
-                .map(|e| e.id);
+                .any(|t| Some(t.id) == self.er.pending)
+        {
+            self.er.pending = None;
+            self.er.link_preview = None;
         }
     }
     pub fn er_has_draft(&self, cx: &App) -> bool {
         self.er.name.read(cx).content.as_ref() != self.er.name_baseline
-            || self.er.field.read(cx).content.as_ref() != self.er.field_baseline
     }
     fn er_load_names(&mut self, cx: &mut Context<Self>) {
-        let table = self
+        let name = self
             .er
             .graph
             .tables
             .iter()
-            .find(|t| Some(t.id) == self.er.selected);
-        let name = table.map(|t| t.name.clone()).unwrap_or_default();
-        let field = table
-            .and_then(|t| {
-                t.fields
-                    .iter()
-                    .find(|f| Some(f.id) == self.er.editing_field)
-            })
-            .map(|f| f.name.clone())
+            .find(|t| Some(t.id) == self.er.selected)
+            .map(|t| t.name.clone())
             .unwrap_or_default();
         self.er.name_baseline = name.clone();
-        self.er.field_baseline = field.clone();
         if self.er.name.read(cx).content.as_ref() != name {
             self.er.name.update(cx, |i, cx| i.set_content(name, cx));
-        }
-        if self.er.field.read(cx).content.as_ref() != field {
-            self.er.field.update(cx, |i, cx| i.set_content(field, cx));
         }
     }
     pub fn er_commit_names(&mut self, cx: &mut Context<Self>) {
@@ -385,31 +393,13 @@ impl SubCardView {
             .tables
             .iter()
             .find(|t| Some(t.id) == self.er.selected)
-            .cloned()
         {
             let name = self.er.name.read(cx).content.to_string();
-            if name != self.er.name_baseline {
-                if let Err(e) = self
-                    .document
-                    .er_command(json!({"op":"update_table","id":t.id,"name":name,"color":t.color}))
-                {
-                    self.error = Some(e);
-                }
-            }
-            if let Some(f) = t
-                .fields
-                .iter()
-                .find(|f| Some(f.id) == self.er.editing_field)
+            if let Err(e) = self
+                .document
+                .er_command(json!({"op":"update_table","id":t.id,"name":name,"color":t.color}))
             {
-                let name = self.er.field.read(cx).content.to_string();
-                if name != self.er.field_baseline {
-                    if let Err(e) = self
-                        .document
-                        .er_command(json!({"op":"update_index","table":t.id,"id":f.id,"name":name}))
-                    {
-                        self.error = Some(e);
-                    }
-                }
+                self.error = Some(e);
             }
         }
         self.er_refresh();
@@ -417,6 +407,7 @@ impl SubCardView {
         cx.notify();
     }
     fn er_command(&mut self, value: Value, cx: &mut Context<Self>) {
+        self.er.reveal = None;
         self.er_commit_names(cx);
         match self.document.er_command(value) {
             Ok(()) => self.error = None,
@@ -441,69 +432,41 @@ impl SubCardView {
         cx: &mut Context<Self>,
     ) {
         self.er_commit_names(cx);
-        let connection = self.er.graph.edges.iter().find(|e| Some(e.id) == edge);
-        self.er.selected = table.or_else(|| connection.map(|e| e.table));
+        self.er.selected = table;
         self.er.edge = edge;
-        self.er.editing_field = connection.map(|e| e.field);
-        self.er.field_menu = false;
         self.er_load_names(cx);
         w.focus(&self.er.focus);
         cx.notify();
     }
-    fn er_select_field(&mut self, table: i32, field: i32, w: &mut Window, cx: &mut Context<Self>) {
-        self.er_select(Some(table), None, w, cx);
-        self.er.editing_field = Some(field);
-        self.er.edge = self
-            .er
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.field == field)
-            .map(|e| e.id);
-        self.er_load_names(cx);
-    }
-    fn er_add_field(&mut self, kind: &str, w: &mut Window, cx: &mut Context<Self>) {
+    fn er_begin_connection(&mut self, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
-        let Some(t) = self
-            .er
-            .graph
-            .tables
-            .iter()
-            .find(|t| Some(t.id) == self.er.selected)
-        else {
+        if !self.document.schema_locked() && !self.document.using_document() {
+            self.er.pending = self.er.selected;
+            self.er.link_preview = None;
+            self.er.link_start = None;
+            cx.notify();
+        }
+    }
+    fn er_connect(&mut self, target: i32, cx: &mut Context<Self>) {
+        let Some(source) = self.er.pending.take() else {
             return;
         };
-        let id = t.id;
-        let label = if kind == "index" {
-            "Index"
-        } else {
-            "Connection"
-        };
-        let mut n = 1;
-        while t
-            .fields
-            .iter()
-            .any(|f| f.name.to_lowercase() == format!("{label} {n}").to_lowercase())
-        {
-            n += 1;
-        }
+        let count = self.er.graph.edges.len();
         self.er_command(
-            json!({"op":"add_index","table":id,"name":format!("{label} {n}"),"kind":kind}),
+            json!({"op":"add_connection","table":source,"target":target}),
             cx,
         );
-        if let Some(f) = self
-            .er
-            .graph
-            .tables
-            .iter()
-            .find(|t| t.id == id)
-            .and_then(|t| t.fields.last())
-            .map(|f| f.id)
-        {
-            self.er_select_field(id, f, w, cx);
+        self.er.link_preview = None;
+        self.er.link_start = None;
+        if self.er.graph.edges.len() == count + 1 {
+            self.er.selected = None;
+            self.er.edge = self.er.graph.edges.last().map(|e| e.id);
+            self.er_load_names(cx);
         }
+        cx.notify();
     }
     fn er_add(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let start = self.er.viewport();
         self.er_commit_names(cx);
         let count = self.er.graph.tables.len();
         let mut n = count + 1;
@@ -529,6 +492,15 @@ impl SubCardView {
                 f64::from(bounds.size.height),
             );
             self.er_view(view, cx);
+            let target = self.er.graph.view.clone();
+            if start.pan_x != target.pan_x || start.pan_y != target.pan_y {
+                self.er.reveal = Some(Reveal {
+                    from: start,
+                    to: target,
+                    began: Instant::now(),
+                });
+                cx.notify();
+            }
         }
     }
     fn er_copy(&mut self, cx: &mut Context<Self>) {
@@ -603,6 +575,9 @@ impl SubCardView {
     fn er_down(&mut self, event: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
         w.focus(&self.er.focus);
+        if self.er.reveal.is_some() {
+            self.er_view(self.er.viewport(), cx);
+        }
         let p = self.er.position(event.position);
         let b = self.er.bounds.get();
         let x = f32::from(event.position.x - b.origin.x);
@@ -623,46 +598,36 @@ impl SubCardView {
             self.er_drag(event.position, cx);
             return;
         }
+        if self.er.pending.is_some() {
+            if let Some(target) = self.er.target(p) {
+                self.er_connect(target, cx);
+            } else {
+                self.er.pending = None;
+                self.er.link_preview = None;
+            }
+            return;
+        }
         if let Some(source) = self
             .er
             .port(p, true)
             .filter(|_| !self.document.schema_locked() && !self.document.using_document())
         {
-            self.er_select_field(source.0, source.1, w, cx);
-            self.er.pending = Some(source);
+            self.er_select(Some(source), None, w, cx);
+            self.er_begin_connection(cx);
+            self.er.link_start = Some(p);
             self.er.link_preview = Some(p);
-            cx.notify();
             return;
         }
-        if let Some((source, field)) = self.er.pending {
-            if let Some((target, target_field)) = self.er.target(p) {
-                self.er_command(json!({"op":"connect","table":source,"field":field,"target":target,"targetField":target_field}),cx);
-                self.er.pending = None;
-                self.er.link_preview = None;
-                return;
-            }
-        }
-        if let Some(t) = self
-            .er
-            .tables()
-            .into_iter()
-            .rev()
-            .find(|t| p.0 >= t.x && p.0 <= t.x + 320. && p.1 >= t.y && p.1 <= t.y + t.height())
-        {
-            let row = ((p.1 - t.y - 64.) / 32.).floor() as isize;
-            if row >= 0 && (row as usize) < t.fields.len() {
-                let f = &t.fields[row as usize];
-                self.er_select_field(t.id, f.id, w, cx);
-                if f.kind == "secondary"
-                    && !self.document.using_document()
-                    && !self.document.schema_locked()
-                {
-                    self.er.pending = Some((t.id, f.id));
-                    self.er.link_preview = Some(p);
-                }
-                return;
-            }
-            self.er_select(Some(t.id), None, w, cx);
+        if let Some(id) = self.er.target(p) {
+            let t = self
+                .er
+                .graph
+                .tables
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .clone();
+            self.er_select(Some(id), None, w, cx);
             if !self.document.using_document() {
                 self.er.drag = Some(Drag::Table(t.id, t.x, t.y, p.0, p.1));
             }
@@ -675,9 +640,17 @@ impl SubCardView {
             .iter()
             .rev()
             .find(|e| {
-                route(&self.er.tables(), e)
-                    .windows(2)
-                    .any(|s| segment_distance(p, s[0], s[1]) < 10. / self.er.scale())
+                let points = route(&self.er.tables(), e, &self.er.graph.edges);
+                let label_hit = label_position(&points, self.er.scale()).is_some_and(|q| {
+                    let scale = self.er.scale();
+                    let width = (26. * scale).max(26.) / scale;
+                    let height = (20. * scale).max(20.) / scale;
+                    p.0 >= q.0 && p.0 <= q.0 + width && p.1 >= q.1 && p.1 <= q.1 + height
+                });
+                label_hit
+                    || points
+                        .windows(2)
+                        .any(|s| segment_distance(p, s[0], s[1]) < 10. / self.er.scale())
             })
             .map(|e| e.id);
         self.er_select(None, hit, w, cx);
@@ -738,25 +711,46 @@ impl SubCardView {
         if let Some((id, x, y)) = self.er.preview.take() {
             self.er_command(json!({"op":"move_table","id":id,"x":x,"y":y}), cx);
         }
-        if let Some((source, field)) = self.er.pending {
-            if let Some((target, target_field)) = self.er.target(self.er.position(event.position)) {
-                self.er_command(json!({"op":"connect","table":source,"field":field,"target":target,"targetField":target_field}),cx);
-                self.er.pending = None;
-                self.er.link_preview = None;
+        if self.er.pending.is_some() {
+            let p = self.er.position(event.position);
+            // Clicking the source port arms it; dragging completes immediately.
+            let dragged = self
+                .er
+                .link_start
+                .is_some_and(|start| distance(start, p) * self.er.scale() >= 5.);
+            if dragged {
+                if let Some(target) = self.er.target(p) {
+                    self.er_connect(target, cx);
+                } else {
+                    self.er.pending = None;
+                    self.er.link_preview = None;
+                }
             }
+            self.er.link_start = None;
         }
         self.er.drag = None;
         cx.notify();
     }
-    pub fn er_render(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn er_render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.er_refresh();
         let edit = !self.document.using_document();
         let schema = edit && !self.document.schema_locked();
-        let graph = self.er.graph.clone();
+        if self
+            .er
+            .reveal
+            .as_ref()
+            .is_some_and(|r| r.began.elapsed().as_secs_f64() >= 0.5)
+        {
+            self.er.reveal = None;
+        }
+        if self.er.reveal.is_some() {
+            window.request_animation_frame();
+        }
+        let mut graph = self.er.graph.clone();
+        graph.view = self.er.viewport();
         let tables = self.er.tables();
         let selected = self.er.selected;
         let selected_edge = self.er.edge;
-        let selected_field = self.er.editing_field;
         let pending = self.er.pending;
         let link = self.er.link_preview;
         let bounds = self.er.bounds.clone();
@@ -770,18 +764,18 @@ impl SubCardView {
             .border_color(rgb(0xd2d9e2))
             .child(button("+ Table", schema, cx, |s, w, cx| s.er_add(w, cx)))
             .child(button(
-                "+ Connection",
+                "+ Relationship",
                 schema && selected.is_some(),
                 cx,
-                |s, w, cx| s.er_add_field("secondary", w, cx),
+                |s, _, cx| s.er_begin_connection(cx),
             ))
             .child(button("−", true, cx, |s, _, cx| {
-                let mut v = s.er.graph.view.clone();
+                let mut v = s.er.viewport();
                 v.zoom /= 1.2;
                 s.er_view(v, cx);
             }))
             .child(button("+", true, cx, |s, _, cx| {
-                let mut v = s.er.graph.view.clone();
+                let mut v = s.er.viewport();
                 v.zoom *= 1.2;
                 s.er_view(v, cx);
             }))
@@ -794,7 +788,7 @@ impl SubCardView {
                 true,
                 cx,
                 |s, _, cx| {
-                    let mut v = s.er.graph.view.clone();
+                    let mut v = s.er.viewport();
                     v.zoom = 1.;
                     s.er_view(v, cx);
                 },
@@ -808,7 +802,7 @@ impl SubCardView {
             }))
             .child(button("Paste", schema, cx, |s, w, cx| s.er_paste(w, cx)))
             .when(pending.is_some(), |d| {
-                d.child(button("Cancel link", true, cx, |s, _, cx| {
+                d.child(button("Choose a table • Cancel", true, cx, |s, _, cx| {
                     s.er.pending = None;
                     s.er.link_preview = None;
                     cx.notify();
@@ -832,7 +826,6 @@ impl SubCardView {
                             &tables,
                             selected,
                             selected_edge,
-                            selected_field,
                             pending,
                             link,
                             b,
@@ -852,7 +845,7 @@ impl SubCardView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|s, e, _, cx| s.er_up(e, cx)))
             .on_scroll_wheel(cx.listener(|s, e: &ScrollWheelEvent, _, cx| {
                 let d = e.delta.pixel_delta(px(24.));
-                let mut v = s.er.graph.view.clone();
+                let mut v = s.er.viewport();
                 if e.modifiers.control || e.modifiers.platform {
                     v.zoom *= (f64::from(d.y) * 0.005).exp();
                 } else {
@@ -938,7 +931,37 @@ impl SubCardView {
             .gap_3()
             .text_size(px(14.))
             .child(div().text_size(px(21.)).child("Model details"));
-        if let Some(t) = self
+        if let Some(e) = self
+            .er
+            .graph
+            .edges
+            .iter()
+            .find(|e| Some(e.id) == self.er.edge)
+        {
+            let source = self
+                .er
+                .graph
+                .tables
+                .iter()
+                .find(|t| t.id == e.source_table())
+                .unwrap();
+            let target = self
+                .er
+                .graph
+                .tables
+                .iter()
+                .find(|t| t.id == e.destination_table())
+                .unwrap();
+            let id = e.id;
+            let many = e.many;
+            let cascade = e.cascade;
+            panel = panel.child(div().font_weight(FontWeight::BOLD).child("Relationship"))
+                .child(format!("From: {}", source.name)).child(format!("To: {}", target.name))
+                .child("Cardinality")
+                .child(button(if many {"One to many (1:N)"} else {"One to one (1:1)"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":!many,"cascade":false}),cx)))
+                .when(many,|d|d.child(button(if cascade {"Delete source record: cascade"}else{"Delete source record: block"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":true,"cascade":!cascade}),cx))))
+                .child(button("Delete relationship",schema,cx,move|s,_,cx|s.er_command(json!({"op":"delete_connection","id":id}),cx)));
+        } else if let Some(t) = self
             .er
             .graph
             .tables
@@ -970,112 +993,9 @@ impl SubCardView {
                         }
                     })));
             }
-            panel = panel
-                .child(colors)
-                .child("Implicit primary key: id • auto increment integer")
-                .child(div().font_weight(FontWeight::BOLD).child("Fields"))
-                .child(button("Add field ▾", schema, cx, |s, _, cx| {
-                    s.er_commit_names(cx);
-                    s.er.field_menu = !s.er.field_menu;
-                    cx.notify();
-                }));
-            if self.er.field_menu {
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_2()
-                        .border_1()
-                        .border_color(rgb(0xd2d9e2))
-                        .child(button("Index", schema, cx, |s, w, cx| {
-                            s.er_add_field("index", w, cx)
-                        }))
-                        .child(button("Connection", schema, cx, |s, w, cx| {
-                            s.er_add_field("secondary", w, cx)
-                        })),
-                );
-            }
-            if t.fields.is_empty() {
-                panel = panel.child("Add an index or a connection.");
-            }
-            for f in &t.fields {
-                let fid = f.id;
-                let kind = if f.kind == "secondary" {
-                    "Connection"
-                } else if f.unique {
-                    "Index • unique"
-                } else {
-                    "Index"
-                };
-                panel = panel.child(
-                    button(
-                        format!("{} • {kind}", f.name),
-                        true,
-                        cx,
-                        move |s, w, cx| s.er_select_field(id, fid, w, cx),
-                    )
-                    .when(self.er.editing_field == Some(fid), |d| {
-                        d.bg(rgb(0xdceaff)).border_color(rgb(0x0066dd))
-                    }),
-                );
-            }
-            if let Some(f) = t
-                .fields
-                .iter()
-                .find(|f| Some(f.id) == self.er.editing_field)
-            {
-                let fid = f.id;
-                panel = panel.child(div().border_t_1().pt_2().child("Field name"));
-                if schema {
-                    panel = panel.child(self.er.field.clone());
-                } else {
-                    panel = panel.child(f.name.clone());
-                }
-                if f.kind == "secondary" {
-                    panel = panel.child("Connection (foreign key)");
-                    if let Some(e) = self.er.graph.edges.iter().find(|e| e.field == fid) {
-                        let eid = e.id;
-                        let many = e.many;
-                        let cascade = e.cascade;
-                        let target = self
-                            .er
-                            .graph
-                            .tables
-                            .iter()
-                            .find(|t| t.id == e.target)
-                            .unwrap();
-                        let key = if e.target_field == 0 {
-                            "id (primary key)"
-                        } else {
-                            target
-                                .fields
-                                .iter()
-                                .find(|f| f.id == e.target_field)
-                                .map(|f| f.name.as_str())
-                                .unwrap_or("")
-                        };
-                        panel=panel.child("Destination").child(format!("{} → {key}",target.name))
-                            .child(button(if many {"One to many (1:N)"}else{"One to one (1:1)"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":eid,"many":!many,"cascade":false}),cx)))
-                            .when(many,|d|d.child(button(if cascade {"Delete target: cascade"}else{"Delete target: block"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":eid,"many":true,"cascade":!cascade}),cx))))
-                            .child(button("Disconnect",schema,cx,move|s,_,cx|s.er_command(json!({"op":"delete_connection","id":eid}),cx)));
-                    } else {
-                        panel=panel.child("Not connected").child("Drag this field’s right circle to a table or unique index’s left circle.");
-                    }
-                } else {
-                    let unique = f.unique;
-                    let referenced = self.er.graph.edges.iter().any(|e| e.target_field == fid);
-                    panel=panel.child(button(if unique {"☑ Unique"} else {"☐ Unique"},schema && !referenced,cx,move|s,_,cx| {
-                        s.er_commit_names(cx);
-                        if let Some(f)=s.er.graph.tables.iter().find(|t|t.id==id).and_then(|t|t.fields.iter().find(|f|f.id==fid)) {
-                            s.er_command(json!({"op":"update_index","table":id,"id":fid,"name":f.name,"unique":!unique}),cx);
-                        }
-                    })).child(if referenced { "Disconnect incoming connections before turning Unique off." } else { "Unique values can be a connection destination." });
-                }
-                panel = panel.child(button("Delete field", schema, cx, move |s, _, cx| {
-                    s.er_command(json!({"op":"delete_index","table":id,"id":fid}), cx)
-                }));
-            }
+            panel = panel.child(colors)
+                .child(button("Create relationship", schema, cx, |s,_,cx| s.er_begin_connection(cx)))
+                .child("Choose a table to complete the arrow, or drag the right circle to another table.");
             panel = panel
                 .child(
                     div()
@@ -1092,7 +1012,7 @@ impl SubCardView {
                     s.er_command(json!({"op":"delete_table","id":id}), cx)
                 }));
         } else {
-            panel=panel.child("Select a table, field, or connection to edit its properties.")
+            panel=panel.child("Select a table or relationship arrow to edit its properties.")
                 .child("Drag table headers to move. Drag the background or scroll to pan. Ctrl/Command + scroll zooms.");
         }
         panel
@@ -1108,13 +1028,13 @@ impl SubCardView {
                     .flex()
                     .gap_2()
                     .child(button("Scale −", true, cx, |s, _, cx| {
-                        let mut v = s.er.graph.view.clone();
+                        let mut v = s.er.viewport();
                         v.calibration /= 1.05;
                         s.er_view(v, cx);
                     }))
                     .child(format!("{:.2}×", self.er.graph.view.calibration))
                     .child(button("Scale +", true, cx, |s, _, cx| {
-                        let mut v = s.er.graph.view.clone();
+                        let mut v = s.er.viewport();
                         v.calibration *= 1.05;
                         s.er_view(v, cx);
                     })),
@@ -1144,8 +1064,7 @@ fn paint(
     tables: &[Table],
     selected: Option<i32>,
     selected_edge: Option<i32>,
-    selected_field: Option<i32>,
-    pending: Option<(i32, i32)>,
+    pending: Option<i32>,
     link: Option<(f64, f64)>,
     bounds: Bounds<Pixels>,
     w: &mut Window,
@@ -1198,16 +1117,10 @@ fn paint(
             }
         };
         for e in &g.edges {
-            let points = route(tables, e);
+            let points = route(tables, e, &g.edges);
             draw_line(&points, Some(e.id) == selected_edge, w);
-            if let Some(segment) = points
-                .windows(2)
-                .max_by(|a, b| distance(a[0], a[1]).total_cmp(&distance(b[0], b[1])))
-            {
-                let p = screen((
-                    (segment[0].0 + segment[1].0) / 2.,
-                    (segment[0].1 + segment[1].1) / 2. - 20.,
-                ));
+            if let Some(position) = label_position(&points, s) {
+                let p = screen(position);
                 label(
                     if e.many { "1:N" } else { "1:1" },
                     p,
@@ -1268,32 +1181,12 @@ fn paint(
                     Default::default(),
                 ));
             };
-            circle(port(t, 0, false), false, w);
-            for f in &t.fields {
-                let q = port(t, f.id, f.kind == "secondary");
-                let field_selected = selected && selected_field == Some(f.id);
-                if field_selected {
-                    w.paint_quad(fill(
-                        Bounds::new(
-                            screen((t.x + 1., q.1 - 16.)),
-                            size(px((318. * s) as f32), px((32. * s) as f32)),
-                        ),
-                        rgb(0xdceaff),
-                    ));
-                }
-                let p = screen((t.x + 14., q.1 - 10.));
-                w.with_content_mask(
-                    Some(ContentMask {
-                        bounds: Bounds::new(p, size(px((292. * s) as f32), px((32. * s) as f32))),
-                    }),
-                    |w| label(&f.name, p, (15. * s) as f32, black(), w, cx),
-                );
-                circle(q, field_selected || pending == Some((t.id, f.id)), w);
-            }
+            circle(port(t, false), false, w);
+            circle(port(t, true), pending == Some(t.id), w);
         }
-        if let Some((tid, fid)) = pending {
+        if let Some(tid) = pending {
             if let (Some(t), Some(p)) = (tables.iter().find(|t| t.id == tid), link) {
-                draw_line(&[port(t, fid, true), p], true, w);
+                draw_line(&[port(t, true), p], true, w);
             }
         }
         if tables.is_empty() {
@@ -1373,6 +1266,93 @@ fn paint(
 #[cfg(test)]
 mod viewport_tests {
     use super::{Table, Viewport};
+    #[::core::prelude::v1::test]
+    fn relationship_direction_hidden_keys_and_parallel_routes() {
+        use super::{Edge, Field, label_position, route};
+        let a = Table {
+            id: 1,
+            name: "A".into(),
+            color: "#397DB8".into(),
+            x: 10.,
+            y: 100.,
+            fields: vec![Field {
+                id: 7,
+                name: "legacy hidden key".into(),
+                kind: "secondary".into(),
+                unique: true,
+            }],
+        };
+        let b = Table {
+            id: 2,
+            name: "B".into(),
+            color: "#397DB8".into(),
+            x: 600.,
+            y: 100.,
+            fields: vec![],
+        };
+        assert_eq!(a.height(), 64.);
+        let edge = Edge {
+            id: 3,
+            table: 1,
+            field: 0,
+            target: 2,
+            many: true,
+            cascade: false,
+        };
+        let legacy = Edge {
+            id: 4,
+            table: 2,
+            field: 7,
+            target: 1,
+            many: false,
+            cascade: false,
+        };
+        assert_eq!((edge.source_table(), edge.destination_table()), (1, 2));
+        assert_eq!((legacy.source_table(), legacy.destination_table()), (1, 2));
+        let tables = vec![a, b];
+        let edges = vec![edge, legacy];
+        let first = route(&tables, &edges[0], &edges);
+        let second = route(&tables, &edges[1], &edges);
+        assert_eq!(first.first(), Some(&(330., 130.)));
+        assert_eq!(first.last(), Some(&(600., 130.)));
+        assert_ne!(first, second);
+        assert_ne!(label_position(&first, 1.), label_position(&second, 1.));
+        let self_edge = Edge {
+            id: 5,
+            table: 1,
+            field: 0,
+            target: 1,
+            many: true,
+            cascade: false,
+        };
+        let self_route = route(&tables, &self_edge, std::slice::from_ref(&self_edge));
+        assert_eq!(self_route.len(), 6);
+        assert!(self_route.iter().any(|p| p.1 > 164.));
+    }
+    #[::core::prelude::v1::test]
+    fn animated_reveal_preserves_scale_and_moves_continuously() {
+        let start = Viewport {
+            zoom: 2.,
+            calibration: 1.3,
+            pan_x: -500.,
+            pan_y: 800.,
+        };
+        let target = Viewport {
+            pan_x: 1200.,
+            pan_y: -300.,
+            ..start.clone()
+        };
+        let mut previous = start.clone();
+        for step in 0..=20 {
+            let current = start.panned(&target, step as f64 / 20.);
+            assert!(current.pan_x >= previous.pan_x && current.pan_y <= previous.pan_y);
+            assert_eq!((current.zoom, current.calibration), (2., 1.3));
+            previous = current;
+        }
+        assert_eq!(start.panned(&target, -1.).pan_x, start.pan_x);
+        assert_eq!(start.panned(&target, 2.).pan_y, target.pan_y);
+        assert_eq!(start.panned(&target, 0.5).pan_x, 350.);
+    }
     #[::core::prelude::v1::test]
     fn new_table_is_visible_without_changing_zoom() {
         for (width, height) in [(428., 600.), (900., 500.)] {

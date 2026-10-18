@@ -16,11 +16,11 @@ development signature, USB installation, and launch on an iPhone 12 Pro Max are
 verified. On-device editor and file-provider interactions still need testing.
 
 The editor includes an **entity relationship canvas** for the user data model.
-Create tables, indexed fields with optional uniqueness, and connection (foreign-key)
-fields; draw relationships,
-choose one-to-one or one-to-many cardinality and cascade/block deletion, and
-edit names and colors in the inspector. Pan, zoom, fit, calibrated 100% scale,
-clipboard duplication and undo/redo are supported. Diagram layout and viewport
+Create tables and draw arrows from A to B to mean “A has one/many B.” Select an
+arrow to switch between **1:1** and **1:N** during schema design. Keys and indexes
+are hidden and generated automatically. Edit table names and colors in the
+inspector, and choose cascade/block deletion for one-to-many relationships. Pan, zoom, fit, calibrated 100% scale,
+clipboard duplication and undo/redo are supported. Adding a table smoothly pans the canvas to reveal it. Diagram layout and viewport
 are saved inside the document. Mac uses a resizable inspector; iPhone uses a
 separate details screen. Full card editing, ordinary data fields and scripting
 are future work.

@@ -53,7 +53,7 @@ int subcard_document_discard_fake_data(SubCardDocument* document);
 // Save (including Save As) is a no-op while unchanged. Failure preserves edits.
 int subcard_document_save(SubCardDocument* document, const char* path);
 
-// Version-1 ER graph/viewport JSON. Borrowed until next call/mutation.
+// Version-2 ER graph/viewport JSON (opens version-1 documents). Borrowed until next call/mutation.
 // Command API is shared by frontends and future scripting adapters. See the ER
 // architecture document for the command contract. View changes skip undo history.
 const char* subcard_document_er_json(SubCardDocument* document);

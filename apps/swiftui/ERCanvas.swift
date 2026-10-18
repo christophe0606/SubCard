@@ -40,7 +40,6 @@ struct ERCanvasEditor: View {
     #endif
     .onAppear { attach(document) }
     .onChange(of: store.tableNameDraft) { _ in draftChanged(store.hasDraft) }
-    .onChange(of: store.fieldNameDraft) { _ in draftChanged(store.hasDraft) }
     .id(document)
     .onChange(of: document) { pointer in attach(pointer) }
     .alert(
@@ -57,14 +56,14 @@ struct ERCanvasEditor: View {
     registerEditor { [weak store] detach in
       store?.commitNames()
       draftChanged(false)
-      if detach { store?.document = nil }
+      if detach { store?.cancelReveal(); store?.document = nil }
     }
   }
 }
 
 private struct ERInspector: View {
   @ObservedObject var store: ERStore
-  private enum Editing: Hashable { case table, field }
+  private enum Editing: Hashable { case table }
   @FocusState private var editing: Editing?
   private let colors = ["#397DB8", "#7651A8", "#258775", "#BA6B28", "#B64762", "#556275"]
   private var schemaEditable: Bool { store.editable && !store.locked }
@@ -72,7 +71,16 @@ private struct ERInspector: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         Text("Model details").font(.title2).bold()
-        if let t = store.table {
+        if let e = store.edge {
+          Text("Relationship").font(.headline)
+          Text("From: \(store.tableName(e.sourceTable))")
+          Text("To: \(store.tableName(e.destinationTable))")
+          connectionProperties(e)
+          Button("Delete relationship", role: .destructive) {
+            finishEditing()
+            store.command("delete_connection", ["id": e.id])
+          }.disabled(!schemaEditable)
+        } else if let t = store.table {
           Text(t.name).font(.headline).accessibilityIdentifier("modelTableName")
           TextField("Table name", text: $store.tableNameDraft)
             .textFieldStyle(.roundedBorder).focused($editing, equals: .table)
@@ -90,96 +98,11 @@ private struct ERInspector: View {
               }.buttonStyle(.plain).accessibilityLabel("Color \(color)")
             }
           }.disabled(!store.editable)
-          Text("Every table has an implicit id primary key (auto increment integer).")
-            .font(.caption).foregroundStyle(.secondary)
           Divider()
-          HStack {
-            Text("Fields").font(.headline)
-            Spacer()
-            Menu {
-              Button("Index", systemImage: "key") { addField("index") }
-              Button("Connection", systemImage: "arrow.triangle.branch") { addField("secondary") }
-            } label: {
-              Label("Add field", systemImage: "plus")
-            }
+          Button("Create relationship") { store.beginConnection(); store.showDetails = false }
             .disabled(!schemaEditable)
-          }
-          if t.fields.isEmpty {
-            Text("Add an index or a connection.").foregroundStyle(.secondary)
-          }
-          ForEach(t.fields) { f in
-            Button {
-              finishEditing()
-              store.select(table: t.id, field: f.id)
-            } label: {
-              HStack(alignment: .top) {
-                Image(systemName: f.kind == "index" ? "key" : "arrow.triangle.branch")
-                VStack(alignment: .leading, spacing: 3) {
-                  Text(f.name).foregroundStyle(.primary)
-                  Text(
-                    f.kind == "index"
-                      ? (f.unique ? "Index • unique" : "Index") : "Connection • foreign key"
-                  )
-                  .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if store.selectedField == f.id { Image(systemName: "checkmark") }
-              }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                  store.selectedField == f.id ? Color.accentColor.opacity(0.12) : Color.clear
-                )
-                .cornerRadius(6)
-            }.buttonStyle(.plain)
-          }
-          if let f = store.field {
-            Divider()
-            TextField("Field name", text: $store.fieldNameDraft)
-              .textFieldStyle(.roundedBorder).focused($editing, equals: .field)
-              .submitLabel(.done).onSubmit { finishEditing() }.disabled(!schemaEditable)
-            if f.kind == "secondary" {
-              Text("Connection (foreign key)").font(.caption).foregroundStyle(.secondary)
-              if let e = store.graph.edges.first(where: { $0.field == f.id }) {
-                Text("Destination").font(.headline)
-                Text(store.destination(e)).textSelection(.enabled)
-                connectionProperties(e)
-                Button("Disconnect", role: .destructive) {
-                  finishEditing()
-                  store.command("delete_connection", ["id": e.id])
-                }.disabled(!schemaEditable)
-              } else {
-                Text("Not connected").foregroundStyle(.secondary)
-                Text(
-                  "On the canvas, drag this field’s right circle to a table’s left circle or an index’s left circle."
-                )
-                .font(.caption)
-              }
-            } else {
-              Toggle(
-                "Unique",
-                isOn: Binding(
-                  get: { f.unique },
-                  set: { unique in
-                    finishEditing()
-                    store.command(
-                      "update_index",
-                      [
-                        "table": t.id, "id": f.id,
-                        "name": store.field?.name ?? f.name, "unique": unique,
-                      ])
-                  })
-              ).disabled(
-                !schemaEditable || store.graph.edges.contains(where: { $0.targetField == f.id }))
-              Text("Unique values identify one record and can be a connection destination.").font(
-                .caption)
-              if store.graph.edges.contains(where: { $0.targetField == f.id }) {
-                Text("Disconnect incoming connections before turning Unique off.").font(.caption)
-              }
-            }
-            Button("Delete field", role: .destructive) {
-              finishEditing()
-              store.command("delete_index", ["table": t.id, "id": f.id])
-            }.disabled(!schemaEditable)
-          }
+          Text("Choose another table to complete the arrow, or drag from this table’s right circle to another table.")
+            .font(.caption).foregroundStyle(.secondary)
           Divider()
           HStack {
             Button("Copy") {
@@ -196,10 +119,10 @@ private struct ERInspector: View {
             store.command("delete_table", ["id": t.id])
           }.disabled(!schemaEditable)
         } else {
-          Text("Select a table, field, or connection to edit its properties.").foregroundStyle(
+          Text("Select a table or relationship arrow to edit its properties.").foregroundStyle(
             .secondary)
           Text(
-            "Drag a table header to move it. Drag a connection’s right circle to a primary key or index’s left circle."
+            "Drag a table to move it. Drag its right circle to another table to create a relationship."
           )
         }
         Divider()
@@ -227,11 +150,6 @@ private struct ERInspector: View {
     store.commitNames()
     editing = nil
   }
-  private func addField(_ kind: String) {
-    finishEditing()
-    store.addField(kind)
-    editing = .field
-  }
   private func connectionProperties(_ e: EREdge) -> some View {
     VStack(alignment: .leading, spacing: 12) {
       Picker(
@@ -249,7 +167,7 @@ private struct ERInspector: View {
       }
       if e.many {
         Picker(
-          "Deleting target",
+          "Deleting a source record",
           selection: Binding(
             get: { e.cascade },
             set: { cascade in
@@ -269,16 +187,14 @@ private struct ERCanvasSurface: View {
   @ObservedObject var store: ERStore
   @State private var dragStart: CGPoint?
   @State private var moving: Int?
-  @State private var tappedTable: Int?
-  @State private var tappedField: Int?
+  @State private var startedConnection = false
   @State private var preview: CGPoint?
   @State private var initialView = ERViewport()
-  @State private var pending: (Int, Int)?
   @State private var linkPreview: CGPoint?
   @State private var pinchStart: ERViewport?
   @State private var pinchAnchor = CGPoint.zero
   private let width = 320.0
-  private var scale: Double { store.graph.view.zoom * store.graph.view.calibration }
+  private var scale: Double { store.viewport.zoom * store.viewport.calibration }
   private var tables: [ERTable] {
     store.graph.tables.map { t in
       var t = t
@@ -304,11 +220,11 @@ private struct ERCanvasSurface: View {
               .accessibilityLabel("Add table")
               .disabled(!store.editable || store.locked)
             Button {
-              store.addField("secondary", details: false)
+              store.beginConnection()
             } label: {
-              Label("Connection", systemImage: "arrow.triangle.branch")
+              Label("Relationship", systemImage: "arrow.triangle.branch")
             }.disabled(!store.editable || store.locked || store.table == nil)
-              .accessibilityLabel("Add connection to selected table")
+              .accessibilityLabel("Create relationship from selected table")
             Menu {
               Button("Fit to Window", systemImage: "arrow.up.left.and.arrow.down.right") {
                 fit(outer.size)
@@ -317,11 +233,11 @@ private struct ERCanvasSurface: View {
               ForEach([25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { percent in
                 Button {
                   store.view(
-                    store.graph.view.zoomed(
+                    store.viewport.zoomed(
                       to: Double(percent) / 100,
                       at: CGPoint(x: outer.size.width / 2, y: max(0, outer.size.height - 48) / 2)))
                 } label: {
-                  if abs(store.graph.view.zoom * 100 - Double(percent)) < 0.001 {
+                  if abs(store.viewport.zoom * 100 - Double(percent)) < 0.001 {
                     Label("\(percent)%", systemImage: "checkmark")
                   } else {
                     Text("\(percent)%")
@@ -329,11 +245,11 @@ private struct ERCanvasSurface: View {
                 }
               }
             } label: {
-              Label(store.graph.view.zoomLabel, systemImage: "chevron.down")
+              Label(store.viewport.zoomLabel, systemImage: "chevron.down")
             }
             .buttonStyle(.bordered)
             .accessibilityLabel("Zoom")
-            .accessibilityValue(store.graph.view.zoomLabel)
+            .accessibilityValue(store.viewport.zoomLabel)
             #if os(iOS)
               Menu {
                 Button("Undo", systemImage: "arrow.uturn.backward") { store.command("undo") }
@@ -366,9 +282,9 @@ private struct ERCanvasSurface: View {
                 !store.graph.canRedo || !store.editable)
               Button("Paste", action: store.paste).disabled(store.locked || !store.editable)
             #endif
-            if pending != nil {
+            if store.pendingSource != nil {
               Button("Cancel link") {
-                pending = nil
+                store.pendingSource = nil
                 linkPreview = nil
               }
             }
@@ -387,7 +303,7 @@ private struct ERCanvasSurface: View {
                     if zooming {
                       store.zoom(exp(dy * 0.005))
                     } else {
-                      var v = store.graph.view
+                      var v = store.viewport
                       v.panX -= dx / scale
                       v.panY -= dy / scale
                       store.view(v)
@@ -407,7 +323,7 @@ private struct ERCanvasSurface: View {
                   MagnificationGesture().onChanged { factor in
                     if pinchStart == nil {
                       cancelDrag()
-                      pinchStart = store.graph.view
+                      pinchStart = store.viewport
                       pinchAnchor = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
                     }
                     if let start = pinchStart {
@@ -421,107 +337,103 @@ private struct ERCanvasSurface: View {
                     "Add a table to start your data model\nDrag the background to pan • Choose a zoom percentage or pinch"
                   )
                   .foregroundStyle(.secondary).padding(24).allowsHitTesting(false)
-                } else if pending != nil {
-                  Text("Choose a left circle to complete the connection").font(.caption).padding(8)
+                } else if store.pendingSource != nil {
+                  Text("Choose a table to complete the relationship").font(.caption).padding(8)
                     .background(.regularMaterial).allowsHitTesting(false)
                 }
               }
-            if extent.height * scale > geo.size.height || store.graph.view.panY != 0 {
+            if extent.height * scale > geo.size.height || store.viewport.panY != 0 {
               ERScrollbar(
                 value: Binding(
-                  get: { store.graph.view.panY },
+                  get: { store.viewport.panY },
                   set: { y in
-                    var v = store.graph.view
+                    var v = store.viewport
                     v.panY = y
                     store.view(v)
                   }),
                 extent: max(
                   extent.height,
-                  max(geo.size.height / scale, geo.size.height / scale + store.graph.view.panY))
-                  - min(0, store.graph.view.panY),
+                  max(geo.size.height / scale, geo.size.height / scale + store.viewport.panY))
+                  - min(0, store.viewport.panY),
                 viewport: geo.size.height / scale, vertical: true,
-                origin: min(0, store.graph.view.panY)
+                origin: min(0, store.viewport.panY)
               )
               .frame(width: 14).frame(maxWidth: .infinity, alignment: .trailing)
             }
           }
         }
-        if extent.width * scale > outer.size.width || store.graph.view.panX != 0 {
+        if extent.width * scale > outer.size.width || store.viewport.panX != 0 {
           ERScrollbar(
             value: Binding(
-              get: { store.graph.view.panX },
+              get: { store.viewport.panX },
               set: { x in
-                var v = store.graph.view
+                var v = store.viewport
                 v.panX = x
                 store.view(v)
               }),
             extent: max(
               extent.width,
-              max(outer.size.width / scale, outer.size.width / scale + store.graph.view.panX))
-              - min(0, store.graph.view.panX),
+              max(outer.size.width / scale, outer.size.width / scale + store.viewport.panX))
+              - min(0, store.viewport.panX),
             viewport: outer.size.width / scale, vertical: false,
-            origin: min(0, store.graph.view.panX)
+            origin: min(0, store.viewport.panX)
           ).frame(height: 14)
         }
       }
     }
   }
   private func point(_ p: CGPoint) -> CGPoint {
-    CGPoint(x: p.x / scale + store.graph.view.panX, y: p.y / scale + store.graph.view.panY)
+    CGPoint(x: p.x / scale + store.viewport.panX, y: p.y / scale + store.viewport.panY)
   }
   private func screen(_ p: CGPoint) -> CGPoint {
-    CGPoint(x: (p.x - store.graph.view.panX) * scale, y: (p.y - store.graph.view.panY) * scale)
+    CGPoint(x: (p.x - store.viewport.panX) * scale, y: (p.y - store.viewport.panY) * scale)
   }
-  private func port(_ table: ERTable, _ field: Int, right: Bool) -> CGPoint {
-    let y = field == 0 ? 30 : 80 + Double(table.fields.firstIndex { $0.id == field } ?? 0) * 32
-    return CGPoint(x: table.x + (right ? width : 0), y: table.y + y)
+  private func port(_ table: ERTable, right: Bool) -> CGPoint {
+    CGPoint(x: table.x + (right ? width : 0), y: table.y + 30)
   }
-  private func hitPort(_ p: CGPoint, right: Bool) -> (Int, Int)? {
+  private func hitPort(_ p: CGPoint, right: Bool) -> Int? {
     for t in tables.reversed() {
-      let fields =
-        t.fields.filter { $0.kind == (right ? "secondary" : "index") && (right || $0.unique) }.map(
-          \.id)
-        + (right ? [] : [0])
-      for f in fields {
-        let q = port(t, f, right: right)
-        if hypot(p.x - q.x, p.y - q.y) < max(12, 14 / scale) { return (t.id, f) }
-      }
+      let q = port(t, right: right)
+      if hypot(p.x - q.x, p.y - q.y) < max(12, 14 / scale) { return t.id }
     }
     return nil
   }
-  private func hitTarget(_ p: CGPoint) -> (Int, Int)? {
-    if let port = hitPort(p, right: false) { return port }
-    for t in tables.reversed() where p.x >= t.x && p.x <= t.x + width {
-      if p.y >= t.y && p.y < t.y + 60 { return (t.id, 0) }
-      let row = Int(floor((p.y - t.y - 64) / 32))
-      if row >= 0 && row < t.fields.count {
-        let f = t.fields[row]
-        if f.kind == "index" && f.unique { return (t.id, f.id) }
-      }
-    }
-    return nil
+  private func hitTarget(_ p: CGPoint) -> Int? {
+    if let id = hitPort(p, right: false) { return id }
+    return tables.reversed().first {
+      CGRect(x: $0.x, y: $0.y, width: width, height: $0.height).contains(p)
+    }?.id
   }
   private func route(_ e: EREdge) -> [CGPoint] {
-    guard let a = tables.first(where: { $0.id == e.table }),
-      let b = tables.first(where: { $0.id == e.target })
+    guard let a = tables.first(where: { $0.id == e.sourceTable }),
+      let b = tables.first(where: { $0.id == e.destinationTable })
     else { return [] }
-    let p = port(a, e.field, right: true)
-    let q = port(b, e.targetField, right: false)
-    if q.x > p.x + 50 {
+    let p = port(a, right: true)
+    let q = port(b, right: false)
+    let lane = store.graph.edges.filter {
+      $0.sourceTable == e.sourceTable && $0.destinationTable == e.destinationTable
+    }.firstIndex { $0.id == e.id } ?? 0
+    if q.x > p.x + 50 && lane == 0 {
       let mid = (p.x + q.x) / 2
       return [p, CGPoint(x: mid, y: p.y), CGPoint(x: mid, y: q.y), q]
     }
-    let bottom = max(a.y + a.height, b.y + b.height) + 40
+    let bottom = max(a.y + a.height, b.y + b.height) + 40 + Double(lane) * 24
     return [
       p, CGPoint(x: p.x + 30, y: p.y), CGPoint(x: p.x + 30, y: bottom),
       CGPoint(x: q.x - 30, y: bottom), CGPoint(x: q.x - 30, y: q.y), q,
     ]
   }
+  private func labelPoint(_ points: [CGPoint]) -> CGPoint? {
+    guard let (a, b) = zip(points, points.dropFirst()).max(by: {
+      hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) < hypot($1.0.x - $1.1.x, $1.0.y - $1.1.y)
+    }) else { return nil }
+    return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 12)
+  }
   private func draw(_ ctx: inout GraphicsContext, size: CGSize) {
     let step = 32 * scale
     if step > 7 {
-      let startX = (-store.graph.view.panX * scale).truncatingRemainder(dividingBy: step)
-      let startY = (-store.graph.view.panY * scale).truncatingRemainder(dividingBy: step)
+      let startX = (-store.viewport.panX * scale).truncatingRemainder(dividingBy: step)
+      let startY = (-store.viewport.panY * scale).truncatingRemainder(dividingBy: step)
       for x in stride(from: startX, to: size.width, by: step) {
         for y in stride(from: startY, to: size.height, by: step) {
           ctx.fill(
@@ -549,17 +461,10 @@ private struct ERCanvasSurface: View {
     for e in store.graph.edges {
       let points = route(e)
       line(points, selected: e.id == store.selectedEdge)
-      if points.count > 1 {
-        let pairs = zip(points, points.dropFirst())
-        let segment = pairs.max {
-          hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) < hypot($1.0.x - $1.1.x, $1.0.y - $1.1.y)
-        }
-        if let (a, b) = segment {
-          ctx.draw(
-            Text(e.many ? "1:N" : "1:1").font(.system(size: max(10, 13 * scale))).foregroundColor(
-              e.id == store.selectedEdge ? .accentColor : .primary),
-            at: screen(CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 12)))
-        }
+      if let label = labelPoint(points) {
+        ctx.draw(
+          Text(e.many ? "1:N" : "1:1").font(.system(size: max(10, 13 * scale))).foregroundColor(
+            e.id == store.selectedEdge ? .accentColor : .primary), at: screen(label))
       }
     }
     for t in tables {
@@ -581,32 +486,11 @@ private struct ERCanvasSurface: View {
       title.draw(
         Text(t.name).font(.system(size: 72 / 2.54 * scale, weight: .semibold)).foregroundColor(
           .white), at: CGPoint(x: p.x + 16 * scale, y: p.y + 30 * scale), anchor: .leading)
-      circle(&ctx, port(t, 0, right: false), selected: false)
-      for f in t.fields {
-        let center = port(t, f.id, right: f.kind == "secondary")
-        let fieldSelected = selected && store.selectedField == f.id
-        if fieldSelected {
-          ctx.fill(
-            Path(
-              CGRect(
-                x: p.x + scale, y: screen(center).y - 16 * scale,
-                width: (width - 2) * scale, height: 32 * scale)),
-            with: .color(.accentColor.opacity(0.15)))
-        }
-        var row = ctx
-        row.clip(
-          to: Path(
-            CGRect(
-              x: p.x + 14 * scale, y: screen(center).y - 16 * scale, width: (width - 28) * scale,
-              height: 32 * scale)))
-        row.draw(
-          Text(f.name).font(.system(size: 15 * scale)).foregroundColor(.black),
-          at: CGPoint(x: p.x + 15 * scale, y: screen(center).y), anchor: .leading)
-        circle(&ctx, center, selected: fieldSelected || (pending?.0 == t.id && pending?.1 == f.id))
-      }
+      circle(&ctx, port(t, right: false), selected: false)
+      circle(&ctx, port(t, right: true), selected: store.pendingSource == t.id)
     }
-    if let pending, let table = tables.first(where: { $0.id == pending.0 }), let linkPreview {
-      line([port(table, pending.1, right: true), linkPreview], selected: true)
+    if let source = store.pendingSource, let table = tables.first(where: { $0.id == source }), let linkPreview {
+      line([port(table, right: true), linkPreview], selected: true)
     }
   }
   private func circle(_ ctx: inout GraphicsContext, _ center: CGPoint, selected: Bool) {
@@ -620,30 +504,19 @@ private struct ERCanvasSurface: View {
     let translation = CGSize(width: location.x - start.x, height: location.y - start.y)
     let p = point(start)
     if dragStart == nil {
+      store.interruptReveal()
       dragStart = p
-      initialView = store.graph.view
-      if let source = hitPort(p, right: true), store.editable && !store.locked {
-        pending = source
-        tappedTable = source.0
-        tappedField = source.1
-        store.select(table: source.0, field: source.1, details: false)
-      } else if pending == nil || hitPort(p, right: false) == nil,
-        let t = tables.reversed().first(where: {
-          CGRect(x: $0.x, y: $0.y, width: width, height: $0.height).contains(p)
-        })
-      {
-        tappedTable = t.id
-        let row = Int(floor((p.y - t.y - 64) / 32))
-        if row >= 0 && row < t.fields.count {
-          let f = t.fields[row]
-          tappedField = f.id
-          store.select(table: t.id, field: f.id, details: false)
-          if f.kind == "secondary" && store.editable && !store.locked { pending = (t.id, f.id) }
-        } else {
-          store.select(table: t.id, details: false)
-        }
-        if tappedField == nil && store.editable {
-          moving = t.id
+      initialView = store.viewport
+      if store.pendingSource != nil {
+        // A toolbar action or a tap on the right circle armed the source table.
+      } else if let source = hitPort(p, right: true), store.editable && !store.locked {
+        store.select(table: source, details: false)
+        store.beginConnection()
+        startedConnection = true
+      } else if let id = hitTarget(p), let t = tables.first(where: { $0.id == id }) {
+        store.select(table: id, details: false)
+        if store.editable {
+          moving = id
           preview = CGPoint(x: t.x, y: t.y)
         }
       }
@@ -652,7 +525,7 @@ private struct ERCanvasSurface: View {
       preview = CGPoint(
         x: min(100000, max(0, table.x + translation.width / scale)),
         y: min(100000, max(0, table.y + translation.height / scale)))
-    } else if pending != nil {
+    } else if store.pendingSource != nil {
       linkPreview = point(location)
     } else if hypot(translation.width, translation.height) > 4 {
       var v = initialView
@@ -663,27 +536,30 @@ private struct ERCanvasSurface: View {
   }
   private func end(start: CGPoint, location: CGPoint) {
     guard pinchStart == nil else { return }
-    let translation = CGSize(width: location.x - start.x, height: location.y - start.y)
     let p = point(location)
-    let tapped = hypot(translation.width, translation.height) < 5
+    let tapped = hypot(location.x - start.x, location.y - start.y) < 5
     if let moving, let preview {
       if !tapped {
         store.command("move_table", ["id": moving, "x": preview.x, "y": preview.y])
       } else {
         store.select(table: moving)
       }
-    } else if let tappedTable, tapped {
-      store.select(table: tappedTable, field: tappedField)
-    } else if let pending, let target = hitTarget(p) {
-      store.command(
-        "connect",
-        ["table": pending.0, "field": pending.1, "target": target.0, "targetField": target.1])
-      self.pending = nil
-      linkPreview = nil
-    } else if tapped && hitPort(p, right: true) == nil && hitPort(p, right: false) == nil {
+    } else if store.pendingSource != nil {
+      if !(startedConnection && tapped) {
+        if let target = hitTarget(p) { store.connect(to: target) }
+        else { store.pendingSource = nil }
+      }
+    } else if tapped {
       var hit: Int?
       for e in store.graph.edges.reversed() {
         let points = route(e)
+        if let label = labelPoint(points) {
+          let q = screen(label)
+          if abs(location.x - q.x) <= max(22, 18 * scale) && abs(location.y - q.y) <= max(12, 10 * scale) {
+            hit = e.id
+            break
+          }
+        }
         for (a, b) in zip(points, points.dropFirst()) {
           let dx = b.x - a.x
           let dy = b.y - a.y
@@ -698,14 +574,16 @@ private struct ERCanvasSurface: View {
       }
       store.select(edge: hit)
     }
-    pending = nil
-    cancelDrag()
+    moving = nil
+    startedConnection = false
+    preview = nil
+    dragStart = nil
+    linkPreview = nil
   }
   private func cancelDrag() {
-    pending = nil
+    store.pendingSource = nil
     moving = nil
-    tappedTable = nil
-    tappedField = nil
+    startedConnection = false
     preview = nil
     dragStart = nil
     linkPreview = nil
@@ -715,7 +593,7 @@ private struct ERCanvasSurface: View {
       switch state {
       case .began:
         cancelDrag()
-        pinchStart = store.graph.view
+        pinchStart = store.viewport
         pinchAnchor = anchor
       case .changed, .ended:
         if let start = pinchStart {
@@ -736,7 +614,7 @@ private struct ERCanvasSurface: View {
       store.view(ERViewport())
       return
     }
-    var v = store.graph.view
+    var v = store.viewport
     v.zoom = min(
       4,
       max(

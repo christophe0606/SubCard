@@ -50,6 +50,19 @@ enum ViewportTests {
         }
       }
     }
+    // Reveal motion must preserve zoom, move continuously, and stop at exact endpoints.
+    let start = ERViewport(zoom: 2, panX: -500, panY: 800, calibration: 1.3)
+    let target = ERViewport(zoom: 2, panX: 1200, panY: -300, calibration: 1.3)
+    var previous = start
+    for progress in stride(from: 0.0, through: 1.0, by: 0.05) {
+      let sample = start.panned(toward: target, progress: progress)
+      assert(sample.panX >= previous.panX && sample.panY <= previous.panY)
+      assert(sample.zoom == 2 && sample.calibration == 1.3)
+      previous = sample
+    }
+    assert(start.panned(toward: target, progress: -1).panX == start.panX)
+    assert(start.panned(toward: target, progress: 2).panY == target.panY)
+    assert(start.panned(toward: target, progress: 0.5).panX == 350)
     let visible = ERViewport(panX: 10, panY: 20)
     let unchanged = visible.revealing(CGRect(x: 50, y: 60, width: 320, height: 64), in: CGSize(width: 900, height: 600))
     assert(unchanged.panX == visible.panX && unchanged.panY == visible.panY)

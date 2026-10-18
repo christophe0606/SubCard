@@ -55,9 +55,132 @@ void sql(const std::string &file, const char *sql) {
     assert(sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close(db);
 }
+std::string join_plan(const std::string &file) {
+    sqlite3 *db = nullptr;
+    assert(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt *q = nullptr;
+    assert(sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN SELECT b.id FROM user_t1 a JOIN user_t2 b ON b.r3=a.id WHERE a.id=1", -1, &q, nullptr) == SQLITE_OK);
+    std::string plan;
+    int result;
+    while ((result = sqlite3_step(q)) == SQLITE_ROW)
+        plan += reinterpret_cast<const char *>(sqlite3_column_text(q, 3));
+    assert(result == SQLITE_DONE);
+    sqlite3_finalize(q);
+    sqlite3_close(db);
+    return plan;
+}
+// User-facing arrows point A -> B; only the backend knows about B's indexed key.
+void table_relationships(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Customers","x":10,"y":10})"); // 1
+    cmd(d, R"({"op":"add_table","name":"Orders","x":500,"y":10})"); // 2
+    fail(d, R"({"op":"add_connection","table":1,"target":999})");
+    fail(d, R"({"op":"add_connection","table":1,"target":2,"many":"many"})");
+    fail(d, R"({"op":"connect","table":1,"field":0,"target":2,"targetField":0})");
+    cmd(d, R"({"op":"add_connection","table":1,"target":2})"); // 3
+    const auto path = (directory / "table-relationships.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), path.c_str())); };
+    save();
+    assert(graph(d).find("\"version\":2") != std::string::npos);
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t1')") == "1");
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2')") == "2");
+    assert(scalar(path, "SELECT json_array([table],[from],[to]) FROM pragma_foreign_key_list('user_t2')") ==
+           "[\"user_t1\",\"r3\",\"id\"]");
+    assert(scalar(path, "SELECT count(*) FROM pragma_index_info('user_r3') WHERE name='r3'") == "1");
+    assert(scalar(path, "SELECT [unique] FROM pragma_index_list('user_t2') WHERE name='user_r3'") == "0");
+    assert(scalar(path, "SELECT json_array_length(json,'$.tables[1].fields') FROM subcard_system_er_model") == "0");
+    // Verify the planner uses both the parent primary key and the generated child index.
+    const auto plan = join_plan(path);
+    assert(plan.find("INTEGER PRIMARY KEY") != std::string::npos);
+    assert(plan.find("USING COVERING INDEX user_r3") != std::string::npos);
+    write(d, "INSERT INTO user_t1 DEFAULT VALUES; INSERT INTO user_t2(r3) VALUES(1),(1),(NULL)");
+    assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, "INSERT INTO user_t2(r3) VALUES(999)"));
+    assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, "DELETE FROM user_t1 WHERE id=1"));
+    fail(d, R"({"op":"update_connection","id":3,"many":false,"cascade":false})");
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"update_connection","id":3,"many":false,"cascade":false})");
+    save();
+    assert(scalar(path, "SELECT count(*) FROM pragma_index_list('user_t2') WHERE [unique]=1") == "1");
+    assert(scalar(path, "SELECT count(*) FROM pragma_index_info((SELECT name FROM pragma_index_list('user_t2') WHERE [unique]=1)) WHERE name='r3'") == "1");
+    assert(scalar(path, "SELECT count(*) FROM sqlite_schema WHERE name='user_r3'") == "0");
+    auto one = own(subcard_document_open(path.c_str()));
+    write(one, "INSERT INTO user_t1 DEFAULT VALUES; INSERT INTO user_t2(r3) VALUES(1),(NULL),(NULL)");
+    assert(!subcard_document_write_user_data(one.get(), SUBCARD_DATA_FAKE, "INSERT INTO user_t2(r3) VALUES(1)"));
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(path, "SELECT [unique] FROM pragma_index_list('user_t2') WHERE name='user_r3'") == "0");
+    cmd(d, R"({"op":"redo"})");
+    cmd(d, R"({"op":"update_connection","id":3,"many":true,"cascade":true})");
+    write(d, "INSERT INTO user_t1 DEFAULT VALUES; INSERT INTO user_t2(r3) VALUES(1),(1); DELETE FROM user_t1 WHERE id=1");
+    assert(subcard_document_data_kind(d.get()) == SUBCARD_DATA_NONE);
+    cmd(d, R"({"op":"delete_connection","id":3})");
+    save();
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2')") == "1");
+    assert(scalar(path, "SELECT count(*) FROM pragma_index_list('user_t2')") == "0");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2') WHERE name='r3'") == "1");
+    auto reopened = own(subcard_document_open(path.c_str()));
+    assert(graph(reopened).find("\"table\":1,\"field\":0,\"target\":2") != std::string::npos);
+    cmd(d, R"({"op":"add_connection","table":1,"target":2,"many":false})"); // 4; parallel relationship
+    cmd(d, R"({"op":"add_connection","table":1,"target":1})"); // 5; self relationship
+    cmd(d, R"({"op":"add_connection","table":2,"target":1})"); // 6; cycle
+    save();
+    auto complex = own(subcard_document_open(path.c_str()));
+    assert(scalar(path, "SELECT count(*) FROM pragma_foreign_key_list('user_t1')") == "2");
+    assert(scalar(path, "SELECT count(*) FROM pragma_foreign_key_list('user_t2')") == "2");
+    cmd(d, R"({"op":"delete_table","id":1})");
+    save();
+    assert(graph(d).find("\"edges\":[]") != std::string::npos);
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2')") == "1");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    auto restored = own(subcard_document_open(path.c_str()));
+    write(restored, "INSERT INTO user_t1 DEFAULT VALUES", SUBCARD_DATA_REAL);
+    fail(restored, R"({"op":"add_connection","table":1,"target":2})");
+    fail(restored, R"({"op":"update_connection","id":3,"many":false,"cascade":false})");
+    fail(restored, R"({"op":"delete_connection","id":3})");
+    assert(subcard_document_set_mode(reopened.get(), SUBCARD_MODE_USE));
+    fail(reopened, R"({"op":"add_connection","table":1,"target":2})");
+    // A storage failure rolls back hidden columns, indexes, and history together.
+    sql(path, "CREATE TRIGGER fail_relationship BEFORE UPDATE ON subcard_system_er_model BEGIN SELECT RAISE(ABORT,'injected failure'); END");
+    auto rejected = own(subcard_document_open(path.c_str()));
+    fail(rejected, R"({"op":"add_connection","table":1,"target":2})");
+    assert(!subcard_document_is_changed(rejected.get()));
+    const auto rollback = (directory / "relationship-rollback.subcard").string();
+    auto snapshot = subcard_document_snapshot(rejected.get());
+    assert(snapshot);
+    {
+        std::ofstream out(rollback, std::ios::binary);
+        out.write(static_cast<const char *>(subcard_snapshot_bytes(snapshot)), subcard_snapshot_size(snapshot));
+        assert(out.good());
+    }
+    subcard_snapshot_close(snapshot);
+    assert(scalar(rollback, "SELECT count(*) FROM pragma_foreign_key_list('user_t2')") == "2");
+    // Version-1 documents keep their existing physical keys, rows and schema lock.
+    auto legacy = own(subcard_document_new());
+    cmd(legacy, R"({"op":"add_table","name":"Parent","x":10,"y":10})");
+    cmd(legacy, R"({"op":"add_table","name":"Child","x":500,"y":10})");
+    cmd(legacy, R"({"op":"add_index","table":2,"name":"parent","kind":"secondary"})");
+    cmd(legacy, R"({"op":"connect","table":2,"field":3,"target":1,"targetField":0})");
+    write(legacy, "INSERT INTO user_t1 DEFAULT VALUES; INSERT INTO user_t2(f3) VALUES(1)", SUBCARD_DATA_REAL);
+    const auto legacyPath = (directory / "legacy-relationship-real.subcard").string();
+    assert(subcard_document_save(legacy.get(), legacyPath.c_str()));
+    sql(legacyPath, "UPDATE subcard_system_er_model SET json=json_set(json,'$.version',1)");
+    auto old = own(subcard_document_open(legacyPath.c_str()));
+    assert(subcard_document_schema_is_locked(old.get()));
+    assert(subcard_document_set_mode(old.get(), SUBCARD_MODE_EDIT));
+    cmd(old, R"({"op":"move_table","id":1,"x":30,"y":20})");
+    assert(subcard_document_save(old.get(), legacyPath.c_str()));
+    assert(scalar(legacyPath, "SELECT f3 FROM user_t2") == "1");
+    assert(scalar(legacyPath, "SELECT [table] FROM pragma_foreign_key_list('user_t2')") == "user_t1");
+    assert(scalar(legacyPath, "SELECT json_extract(json,'$.version') FROM subcard_system_er_model") == "2");
+    std::cout << "Table relationship direction, automatic indexes, cardinality, history and persistence passed.\n";
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
+    table_relationships(argv[1]);
     auto file = (std::filesystem::path(argv[1]) / "er.subcard").string();
     std::filesystem::remove(file);
     auto d = own(subcard_document_new());

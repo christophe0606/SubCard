@@ -106,3 +106,14 @@ and foreign-key definitions, stores layout/view metadata in system tables, and
 owns model undo/redo. Frontends own rendering, hit testing, selection, clipboard
 transport and inspectors. A completed move submits one command. Viewport writes
 persist independently of history, so navigation cannot consume model undo.
+
+
+### Relationship abstraction (2026-10-18)
+
+The editor now models A → B as “A has one/many B.” The shared C++ schema generator
+places the hidden reference in B, automatically indexes it, and adds uniqueness
+for 1:1. Both frontends expose only table arrows and cardinality. Graph version 2
+distinguishes these conceptual arrows from version-1 foreign-key edges; the
+loader preserves existing physical schemas and rows. See the
+[table relationship contract](features/entity-relationship-canvas.md#table-relationships-2026-10-18)
+for generation, compatibility, interaction and verification details.
