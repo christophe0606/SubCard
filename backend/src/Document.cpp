@@ -289,6 +289,13 @@ const char* subcard_document_er_json(SubCardDocument* doc) {
         return doc->er.output.c_str();
     });
 }
+int subcard_document_validate_check(const SubCardDocument* doc, int table, const char* expression) {
+    return protect(0, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        subcard::validate_er_check(doc->er, table, expression);
+        return 1;
+    });
+}
 int subcard_document_er_command(SubCardDocument* doc, const char* command) {
     return protect(0, [=] {
         if (!doc) throw std::runtime_error("Invalid document.");

@@ -13,8 +13,13 @@ struct ERField {
     std::string media = "binary";
     int scale = 2; // Packed BCD: 18 decimal digits, fixed fractional scale.
     bool nullable = true; // Missing metadata preserves older nullable columns.
+    std::string check = ""; // SQL expression referencing stable column IDs.
 };
-struct ERTable { int id; std::string name, color; double x, y; std::vector<ERField> fields; };
+struct ERConstraint { int id; std::string name, expression; };
+struct ERTable {
+    int id; std::string name, color; double x, y; std::vector<ERField> fields;
+    std::vector<ERConstraint> constraints;
+};
 // field == 0: conceptual table -> target relationship; generated target.r<ID> references table.id.
 // field != 0: legacy foreign-key edge, retained without rewriting existing data.
 struct EREdge { int id, table, field, target, targetField; bool many = true, cascade = false; };
@@ -30,6 +35,7 @@ struct ERModel {
 };
 void initialize_er(sqlite3* db, ERModel& model);
 std::string er_json(sqlite3* db, const ERModel& model);
+void validate_er_check(const ERModel& model, int table, const char* expression);
 // Returns false for a no-op. All writes are atomic, including generated schema.
 bool er_command(sqlite3* db, ERModel& model, DocumentState& state, SubCardMode mode, const char* command);
 }

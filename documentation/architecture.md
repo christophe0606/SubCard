@@ -129,6 +129,17 @@ GPUI own draft text and presentation. Ordinary-field options never expose or
 replace generated relationship keys. See the [typed field contract](features/typed-fields.md)
 for storage formats, compatibility, schema-lock rules and current editor scope.
 
+### Custom CHECK expressions (2026-10-18)
+
+ER model version 5 adds an optional field expression and a collection of named
+table constraints. `CheckExpression.cpp` rewrites only identifier tokens between
+visible field labels and stable SQL columns, and compiles actual SQLite CHECKs
+against an in-memory probe table before acceptance. The read-only validation C
+API and the command boundary share this compiler. Copy/paste remaps references;
+renaming fields only changes display labels. The storage authorizer and validator
+share the same function allowlist. Desktop and iPhone retain their own editing
+presentation. See the [CHECK constraint contract](features/check-constraints.md).
+
 ## Native desktop and iPhone presentation
 
 These rules apply to new features in both frontends and are also recorded in

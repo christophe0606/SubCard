@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ERModel.h"
 #include "UTF8.h"
+#include "CheckExpression.h"
 #include "sqlite3.h"
 #include <algorithm>
 #include <cctype>
@@ -57,14 +58,14 @@ struct JSON {
         q.step();
         return q.text();
     }
-    std::string str(const char *key) const {
+    std::string str(const char *key, size_t limit = 256) const {
         require(type(key) == "text", "Missing or invalid text property.");
         Query q(db, "SELECT json_extract(?1,?2)");
         q.bind(1, value);
         q.bind(2, std::string("$.") + key);
         q.step();
         std::string s = q.text();
-        require(s.find('\0') == std::string::npos && s.size() <= 256, "Invalid or oversized text.");
+        require(s.find('\0') == std::string::npos && s.size() <= limit, "Invalid or oversized text.");
         return s;
     }
     double number(const char *key, double limit = 1000000) const {
@@ -124,14 +125,34 @@ bool ordinary(const std::string &kind) {
            kind == "integer" || kind == "boolean" || kind == "blob";
 }
 bool indexable(const std::string &kind) { return ordinary(kind) && kind != "blob" && kind != "decimal"; }
-std::string graph_json(sqlite3 *db, const ERGraph &g) {
-    bool typed = false, rules = false;
+std::vector<std::pair<std::string, std::string>> check_names(const ERTable &t, bool display = false) {
+    std::vector<std::pair<std::string, std::string>> result;
+    for (const auto &f : t.fields)
+        if (!legacy(f)) result.emplace_back(display ? "f" + num(f.id) : f.name,
+                                            display ? sql_identifier(f.name) : "f" + num(f.id));
+    return result;
+}
+std::string user_check(const ERTable &t, const std::string &expression) {
+    return rewrite_check(expression, check_names(t));
+}
+void validate_table_checks(const ERTable &t) {
+    std::vector<std::string> columns;
+    for (const auto &f : t.fields) if (!legacy(f)) columns.push_back("f" + num(f.id));
+    for (const auto &f : t.fields) if (!f.check.empty()) validate_check_sql(f.check, columns);
+    for (const auto &c : t.constraints) validate_check_sql(c.expression, columns);
+}
+std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
+    bool typed = false, rules = false, checks = false;
     for (const auto &t : g.tables)
+    {
+        checks = checks || !t.constraints.empty();
         for (const auto &f : t.fields) {
             typed = typed || !legacy(f);
             rules = rules || (!legacy(f) && (!f.nullable || (f.unique && !f.indexed)));
+            checks = checks || !f.check.empty();
         }
-    std::string s = std::string("{\"version\":") + (rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
+    }
+    std::string s = std::string("{\"version\":") + (checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -150,9 +171,27 @@ std::string graph_json(sqlite3 *db, const ERGraph &g) {
                 s += ",\"indexed\":" + std::string(v.indexed ? "true" : "false") +
                      ",\"nullable\":" + (v.nullable ? "true" : "false") +
                      ",\"media\":" + quote(db, v.media) + ",\"scale\":" + num(v.scale);
+            if (!v.check.empty()) {
+                s += ",\"check\":" + quote(db, v.check);
+                if (display) s += ",\"checkDisplay\":" + quote(db, rewrite_check(v.check, check_names(t, true)));
+            }
             s += "}";
         }
-        s += "]}";
+        s += "]";
+        if (!t.constraints.empty()) {
+            s += ",\"constraints\":[";
+            bool firstConstraint = true;
+            for (const auto &c : t.constraints) {
+                if (!firstConstraint) s += ",";
+                firstConstraint = false;
+                s += "{\"id\":" + num(c.id) + ",\"name\":" + quote(db, c.name) +
+                     ",\"expression\":" + quote(db, c.expression);
+                if (display) s += ",\"displayExpression\":" + quote(db, rewrite_check(c.expression, check_names(t, true)));
+                s += "}";
+            }
+            s += "]";
+        }
+        s += "}";
     }
     s += "],\"edges\":[";
     first = true;
@@ -168,7 +207,7 @@ std::string graph_json(sqlite3 *db, const ERGraph &g) {
     return s + "]}";
 }
 ERTable table_from(const JSON &j) {
-    ERTable t{j.id("id"), j.str("name"), j.str("color"), j.number("x"), j.number("y"), {}};
+    ERTable t{j.id("id"), j.str("name"), j.str("color"), j.number("x"), j.number("y"), {}, {}};
     for (auto &f : j.array("fields")) {
         ERField v{f.id("id"), f.str("name"), f.str("kind")};
         v.unique = f.type("unique").empty() ? legacy(v) : f.boolean("unique");
@@ -176,12 +215,16 @@ ERTable table_from(const JSON &j) {
         if (!f.type("nullable").empty()) v.nullable = f.boolean("nullable");
         if (!f.type("media").empty()) v.media = f.str("media");
         if (!f.type("scale").empty()) v.scale = f.id("scale");
+        if (!f.type("check").empty()) v.check = f.str("check", 4096);
         t.fields.push_back(v);
     }
+    if (!j.type("constraints").empty())
+        for (const auto &c : j.array("constraints"))
+            t.constraints.push_back({c.id("id"), c.str("name"), c.str("expression", 4096)});
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") >= 1 && j.id("version") <= 4, "Unsupported ER model version.");
+    require(j.id("version") >= 1 && j.id("version") <= 5, "Unsupported ER model version.");
     ERGraph g;
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
@@ -255,8 +298,16 @@ int validate(ERGraph &g) {
                         (f.media == "image" || f.media == "video" || f.media == "sound" || f.media == "document")),
                         "Choose a valid blob purpose.");
                 require(f.scale >= 0 && f.scale <= 18, "BCD scale must be between 0 and 18.");
-            } else require(f.nullable, "Generated keys retain their existing nullability.");
+            } else require(f.nullable && f.check.empty(), "Generated keys retain their existing rules.");
         }
+        require(t.constraints.size() <= 32, "A table supports at most 32 named constraints.");
+        std::set<std::string> constraintNames;
+        for (const auto &c : t.constraints) {
+            id(c.id);
+            name(c.name);
+            require(constraintNames.insert(lower(c.name)).second, "Constraint names must be unique within their table.");
+        }
+        validate_table_checks(t);
     }
     std::set<int> connected;
     for (auto &e : g.edges) {
@@ -329,6 +380,7 @@ std::string schema(const ERGraph &g) {
             if ((f.kind == "index" || !legacy(f)) && f.unique)
                 sql += " UNIQUE";
             sql += field_check(f, col);
+            if (!f.check.empty()) sql += " CHECK(" + f.check + ")";
             for (const auto &e : g.edges)
                 if (e.table == t.id && e.field == f.id) {
                     if (!e.many)
@@ -345,6 +397,8 @@ std::string schema(const ERGraph &g) {
                        " REFERENCES user_t" + num(e.table) + "(id) ON DELETE " +
                        (e.cascade ? "CASCADE" : "RESTRICT");
             }
+        for (const auto &c : t.constraints)
+            sql += ",CONSTRAINT " + sql_identifier(c.name) + " CHECK(" + c.expression + ")";
         sql += ") STRICT;";
         for (const auto &e : g.edges)
             if (e.field == 0 && e.target == t.id && e.many)
@@ -362,6 +416,15 @@ void store(sqlite3 *db, const char *tableName, const std::string &json) {
     Query q(db, std::string("UPDATE ") + tableName + " SET json=?1 WHERE id=1");
     q.bind(1, json);
     q.step();
+}
+size_t schema_object_count(const std::string &sql) {
+    size_t count = 0, start = 0;
+    for (size_t i = 0; i < sql.size(); ++i)
+        if (sql[i] == ';' && sqlite3_complete(sql.substr(start, i - start + 1).c_str())) {
+            ++count;
+            start = i + 1;
+        }
+    return count;
 }
 std::string view_json(const ERModel &m) {
     return "{\"zoom\":" + num(m.zoom) + ",\"panX\":" + num(m.panX) + ",\"panY\":" + num(m.panY) +
@@ -390,7 +453,7 @@ void initialize_er(sqlite3 *db, ERModel &m) {
                     "ER metadata and user schema do not match.");
             ++count;
         }
-        require(count == static_cast<size_t>(std::count(expected.begin(), expected.end(), ';')),
+        require(count == schema_object_count(expected),
                 "ER schema objects are missing.");
     }
     Query v(db, "SELECT json FROM subcard_system_er_view WHERE id=1");
@@ -406,10 +469,20 @@ void initialize_er(sqlite3 *db, ERModel &m) {
     m.content = graph_json(db, m.graph) + view_json(m);
 }
 std::string er_json(sqlite3 *db, const ERModel &m) {
-    auto s = graph_json(db, m.graph);
+    auto s = graph_json(db, m.graph, true);
     s.pop_back();
     return s + ",\"view\":" + view_json(m) + ",\"canUndo\":" + (m.undo.empty() ? "false" : "true") +
            ",\"canRedo\":" + (m.redo.empty() ? "false" : "true") + "}";
+}
+void validate_er_check(const ERModel &m, int tableID, const char *expression) {
+    require(expression, "Invalid CHECK expression.");
+    for (const auto &t : m.graph.tables) if (t.id == tableID) {
+        std::vector<std::string> columns;
+        for (const auto &f : t.fields) if (!legacy(f)) columns.push_back("f" + num(f.id));
+        validate_check_sql(user_check(t, expression), columns);
+        return;
+    }
+    throw std::runtime_error("Table no longer exists.");
 }
 bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode, const char *command) {
     require(command, "Invalid command.");
@@ -446,7 +519,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g = undo ? list.back().before : list.back().after;
         changesSchema = list.back().schema;
     } else if (op == "add_table") {
-        g.tables.push_back({next++, j.str("name"), "#397DB8", j.number("x"), j.number("y"), {}});
+        g.tables.push_back({next++, j.str("name"), "#397DB8", j.number("x"), j.number("y"), {}, {}});
     } else if (op == "paste_table") {
         auto t = table_from(j.object("table"));
         t.id = next++;
@@ -464,8 +537,17 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
             t.name = base + " " + std::to_string(suffix++);
         t.x = std::min(100000., t.x + 40);
         t.y = std::min(100000., t.y + 40);
-        for (auto &f : t.fields)
-            f.id = next++;
+        std::vector<std::pair<std::string, std::string>> remap;
+        for (auto &f : t.fields) {
+            const int newID = next++;
+            remap.emplace_back("f" + num(f.id), "f" + num(newID));
+            f.id = newID;
+        }
+        for (auto &f : t.fields) f.check = rewrite_check(f.check, remap);
+        for (auto &c : t.constraints) {
+            c.id = next++;
+            c.expression = rewrite_check(c.expression, remap);
+        }
         g.tables.push_back(t);
     } else if (op == "update_table") {
         auto &t = table(g, j.id("id"));
@@ -487,6 +569,19 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(),
                                      [&](auto &e) { return e.table == id || e.target == id; }),
                       g.edges.end());
+    } else if (op == "add_constraint") {
+        auto &t = table(g, j.id("table"));
+        t.constraints.push_back({next++, j.str("name"), user_check(t, j.str("expression", 4096))});
+    } else if (op == "update_constraint" || op == "delete_constraint") {
+        auto &t = table(g, j.id("table"));
+        const int id = j.id("id");
+        auto it = std::find_if(t.constraints.begin(), t.constraints.end(), [&](const auto &c) { return c.id == id; });
+        require(it != t.constraints.end(), "Constraint no longer exists.");
+        if (op == "delete_constraint") t.constraints.erase(it);
+        else {
+            if (!j.type("name").empty()) it->name = j.str("name");
+            if (!j.type("expression").empty()) it->expression = user_check(t, j.str("expression", 4096));
+        }
     } else if (op == "add_field") {
         ERField f{next++, j.str("name"), j.str("kind"), false};
         require(ordinary(f.kind), "Choose a standard field datatype.");
@@ -496,6 +591,10 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         if (!j.type("media").empty()) f.media = j.str("media");
         if (!j.type("scale").empty()) f.scale = j.id("scale");
         table(g, j.id("table")).fields.push_back(f);
+        if (!j.type("check").empty()) {
+            auto &t = table(g, j.id("table"));
+            t.fields.back().check = user_check(t, j.str("check", 4096));
+        }
     } else if (op == "update_field") {
         auto &f = field(table(g, j.id("table")), j.id("id"));
         require(!legacy(f), "Generated keys are managed through relationships.");
@@ -512,9 +611,10 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         if (!j.type("nullable").empty()) f.nullable = j.boolean("nullable");
         if (!j.type("media").empty()) f.media = j.str("media");
         if (!j.type("scale").empty()) f.scale = j.id("scale");
+        if (!j.type("check").empty()) f.check = user_check(table(g, j.id("table")), j.str("check", 4096));
         changesSchema = before.kind != f.kind || before.indexed != f.indexed ||
                         before.unique != f.unique || before.nullable != f.nullable ||
-                        before.media != f.media || before.scale != f.scale;
+                        before.media != f.media || before.scale != f.scale || before.check != f.check;
     } else if (op == "delete_field") {
         auto &t = table(g, j.id("table"));
         int id = j.id("id");

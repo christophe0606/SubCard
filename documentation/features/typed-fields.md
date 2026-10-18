@@ -30,8 +30,9 @@ the iPhone table-details screen. Turning off Allow NULL generates `NOT NULL`;
 turning on Unique values generates `UNIQUE`. Both are enforced by SQLite for
 inserts and updates, including direct SQL writes. NULL means no value, not empty
 text: a required string can still contain `''`. A nullable unique field permits
-multiple NULLs but rejects duplicate non-NULL values. There is no configurable
-CHECK-rule editor yet; the datatype checks below remain automatic.
+multiple NULLs but rejects duplicate non-NULL values. An optional custom CHECK
+expression per field and multiple named table CHECKs are also available; see the
+[CHECK constraint editor](check-constraints.md). The datatype checks below remain automatic.
 
 Physical column names are stable `f<ID>` values;
 renaming a field changes its label without rewriting or discarding rows.
@@ -100,7 +101,8 @@ and persistent typed storage, not a record-entry or attachment viewer UI.
 
 ## Commands and compatibility
 
-Documents with required fields or uniqueness independent of an optional index
+Documents containing custom CHECKs use ER model version **5**. Documents with
+required fields or uniqueness independent of an optional index
 serialize ER model version **4**. Other ordinary typed fields retain version **3**;
 models containing only earlier keys/relationships retain version 2. Versions 1–3
 remain readable without rebuilding tables or rewriting real data. Missing
@@ -109,9 +111,9 @@ reject version 4, protecting rules they cannot interpret. Document-container
 version remains unchanged.
 
 - `add_field`: `table`, `name`, `kind`; optional `indexed` (false), `unique`
-  (false), `nullable` (true), `media` (binary), `scale` (2).
+  (false), `nullable` (true), `media` (binary), `scale` (2), `check` (empty).
 - `update_field`: `table`, `id`; optional `name`, `kind`, `indexed`, `unique`, `nullable`,
-  `media`, `scale`. Omitted options are preserved. Leaving Blob resets its media
+  `media`, `scale`, `check`. Omitted options are preserved. Leaving Blob resets its media
   purpose to binary; changing to Blob/BCD clears only optional indexing.
 - `delete_field`: `table`, `id`.
 

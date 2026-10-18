@@ -37,7 +37,9 @@ struct ERCanvasEditor: View {
     }
     #if os(macOS)
       .focusedSceneObject(store)
-      .onReceive(NotificationCenter.default.publisher(for: NSTextView.didChangeSelectionNotification)) { _ in
+      .onReceive(
+        NotificationCenter.default.publisher(for: NSTextView.didChangeSelectionNotification)
+      ) { _ in
         store.textSelectionVersion &+= 1
       }
     #endif
@@ -76,6 +78,7 @@ private struct ERInspector: View {
   }
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @FocusState private var editing: Editing?
+  @State private var checkDraft: ERCheckDraft?
   private let colors = ["#397DB8", "#7651A8", "#258775", "#BA6B28", "#B64762", "#556275"]
   private var schemaEditable: Bool { store.editable && !store.locked }
   private var fieldAnimation: Animation? { reduceMotion ? nil : .easeInOut(duration: 0.22) }
@@ -112,21 +115,23 @@ private struct ERInspector: View {
             Divider()
             fields(t)
             Divider()
+            tableConstraints(t)
+            Divider()
             #if os(iOS)
-            HStack {
-              Button("Copy") {
-                finishEditing()
-                store.copy()
+              HStack {
+                Button("Copy") {
+                  finishEditing()
+                  store.copy()
+                }
+                Button("Duplicate") {
+                  finishEditing()
+                  store.duplicate()
+                }.disabled(!schemaEditable)
               }
-              Button("Duplicate") {
+              Button("Delete table", role: .destructive) {
                 finishEditing()
-                store.duplicate()
+                store.command("delete_table", ["id": t.id])
               }.disabled(!schemaEditable)
-            }
-            Button("Delete table", role: .destructive) {
-              finishEditing()
-              store.command("delete_table", ["id": t.id])
-            }.disabled(!schemaEditable)
             #endif
           } else {
             Text("Select a table or relationship arrow to edit its properties.").foregroundStyle(
@@ -159,7 +164,13 @@ private struct ERInspector: View {
         store.editingText = value != nil
         store.commitNames()
       }
-      .onDisappear { finishEditing(); store.editingText = false }
+      .onDisappear {
+        finishEditing()
+        store.editingText = false
+      }
+      .sheet(item: $checkDraft) { draft in
+        ERCheckEditor(store: store, draft: draft)
+      }
       .onChange(of: store.selectedField) { id in
         if let id {
           withAnimation(fieldAnimation) { reader.scrollTo("field-\(id)", anchor: .top) }
@@ -357,11 +368,75 @@ private struct ERInspector: View {
           )
           .font(.caption).foregroundStyle(.secondary)
         }
+        Divider()
+        Text("CHECK constraint").font(.headline)
+        if !field.check.isEmpty {
+          HStack(alignment: .top) {
+            Button {
+              finishEditing()
+              checkDraft = ERCheckDraft(
+                table: table.id, field: field.id, expression: field.checkDisplay)
+            } label: {
+              Text(field.checkDisplay).font(.system(.caption, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }.disabled(!schemaEditable)
+            removeConstraint("Delete field CHECK") {
+              store.command("update_field", ["table": table.id, "id": field.id, "check": ""])
+            }
+          }
+        } else {
+          Button("Add CHECK expression") {
+            finishEditing()
+            checkDraft = ERCheckDraft(table: table.id, field: field.id)
+          }.disabled(!schemaEditable)
+        }
         Button("Delete field", role: .destructive) {
           finishEditing()
           store.command("delete_field", ["table": table.id, "id": field.id])
         }.disabled(!schemaEditable)
       }
+    }
+  }
+  private func removeConstraint(_ label: String, action: @escaping () -> Void) -> some View {
+    Button(role: .destructive) {
+      finishEditing()
+      action()
+    } label: {
+      Image(systemName: "xmark.circle.fill").font(.title3)
+        .frame(minWidth: 44, minHeight: 44)
+    }
+    .buttonStyle(.plain).accessibilityLabel(label).help(label)
+    .disabled(!schemaEditable)
+  }
+  private func tableConstraints(_ table: ERTable) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Table CHECK constraints").font(.headline)
+      ForEach(table.constraints) { constraint in
+        HStack(alignment: .top) {
+          Button {
+            finishEditing()
+            checkDraft = ERCheckDraft(
+              table: table.id, constraint: constraint.id,
+              name: constraint.name, expression: constraint.displayExpression)
+          } label: {
+            VStack(alignment: .leading, spacing: 4) {
+              Text(constraint.name).fontWeight(.semibold)
+              Text(constraint.displayExpression).font(.system(.caption, design: .monospaced))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+          }.disabled(!schemaEditable)
+          removeConstraint("Delete constraint \(constraint.name)") {
+            store.command("delete_constraint", ["table": table.id, "id": constraint.id])
+          }
+        }
+      }
+      Button("Add named constraint") {
+        finishEditing()
+        checkDraft = ERCheckDraft(table: table.id)
+      }.disabled(!schemaEditable || table.constraints.count >= 32)
+      Text(
+        "Every CHECK must pass. NULL results are accepted; use Allow NULL to require a field value."
+      )
+      .font(.caption).foregroundStyle(.secondary)
     }
   }
   private func connectionProperties(_ e: EREdge) -> some View {
@@ -394,6 +469,115 @@ private struct ERInspector: View {
         }
       }
     }.disabled(!schemaEditable)
+  }
+}
+
+private struct ERCheckDraft: Identifiable {
+  let id = UUID()
+  var table: Int
+  var field: Int? = nil
+  var constraint: Int? = nil
+  var name = ""
+  var expression = ""
+}
+
+private struct ERCheckEditor: View {
+  @ObservedObject var store: ERStore
+  @State var draft: ERCheckDraft
+  @Environment(\.dismiss) private var dismiss
+  private var table: ERTable? { store.graph.tables.first { $0.id == draft.table } }
+  private var syntaxError: String? { store.checkValidation(draft.expression, table: draft.table) }
+  private var nameError: String? {
+    guard draft.field == nil else { return nil }
+    if draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return "Enter a constraint name."
+    }
+    if draft.name.utf8.count > 128
+      || draft.name.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
+    {
+      return "Use a name of at most 128 UTF-8 bytes without control characters."
+    }
+    if table?.constraints.contains(where: {
+      $0.id != draft.constraint && $0.name.lowercased() == draft.name.lowercased()
+    }) == true {
+      return "This table already has a constraint with that name."
+    }
+    return nil
+  }
+  var body: some View {
+    #if os(iOS)
+      NavigationStack {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 16) { inputs }.padding(20)
+        }
+        .navigationTitle(draft.field == nil ? "Table constraint" : "Field CHECK")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+          ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+          ToolbarItem(placement: .confirmationAction) {
+            Button("Apply", action: apply).disabled(!canApply)
+          }
+        }
+      }
+    #else
+      VStack(alignment: .leading, spacing: 16) {
+        Text(draft.field == nil ? "Named table constraint" : "Field CHECK expression").font(.title2)
+          .bold()
+        inputs
+        HStack {
+          Spacer()
+          Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+          Button("Apply", action: apply).keyboardShortcut(.defaultAction).disabled(!canApply)
+        }
+      }.padding(20).frame(width: 490)
+    #endif
+  }
+  @ViewBuilder private var inputs: some View {
+    if draft.field == nil {
+      Text("Constraint name").font(.caption).foregroundStyle(.secondary)
+      TextField("Constraint name", text: $draft.name).textFieldStyle(.roundedBorder)
+        .accessibilityIdentifier("constraintName")
+    }
+    Text("Expression").font(.headline)
+    ERCheckInput(text: $draft.expression)
+      .frame(minHeight: 120, maxHeight: 200)
+      .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.5)))
+    Text("Enter only the expression, without CHECK(...). Quote field names with double quotes.")
+      .font(.caption).foregroundStyle(.secondary)
+    if let table {
+      Text(
+        "Fields: "
+          + (["id"]
+          + table.dataFields.map {
+            "\"" + $0.name.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+          }).joined(separator: ", ")
+      )
+      .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+    }
+    if let error = syntaxError ?? nameError {
+      Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier(
+        "checkValidationError")
+    } else {
+      Label("Valid CHECK syntax", systemImage: "checkmark.circle.fill")
+        .font(.caption).foregroundStyle(.green)
+    }
+  }
+  private var canApply: Bool {
+    syntaxError == nil && nameError == nil && store.editable && !store.locked
+  }
+  private func apply() {
+    guard canApply else { return }
+    store.error = nil
+    if let field = draft.field {
+      store.command("update_field", ["table": draft.table, "id": field, "check": draft.expression])
+    } else {
+      var properties: [String: Any] = [
+        "table": draft.table, "name": draft.name, "expression": draft.expression,
+      ]
+      if let id = draft.constraint { properties["id"] = id }
+      store.command(draft.constraint == nil ? "add_constraint" : "update_constraint", properties)
+    }
+    if store.error == nil { dismiss() }
   }
 }
 
@@ -435,10 +619,12 @@ private struct ERCanvasSurface: View {
               #if os(macOS)
                 canvasFocused = true
               #endif
-            } label: { Label("Table", systemImage: "plus") }
-              .buttonStyle(.borderedProminent)
-              .accessibilityLabel("Add table")
-              .disabled(!store.editable || store.locked)
+            } label: {
+              Label("Table", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Add table")
+            .disabled(!store.editable || store.locked)
             Button {
               store.beginConnection()
             } label: {
@@ -532,11 +718,16 @@ private struct ERCanvasSurface: View {
                 .onAppear { canvasFocused = true }
                 .onDeleteCommand { if store.editable && !store.locked { store.deleteSelection() } }
                 .onCopyCommand(perform: store.table == nil ? nil : { store.clipboardProviders() })
-                .onCutCommand(perform: store.table == nil || !store.editable || store.locked
-                  ? nil : { store.clipboardProviders(cutting: true) })
-                .onPasteCommand(of: ["public.utf8-plain-text"], validator: { _ in
-                  store.editable && !store.locked && store.canPasteTable ? true : nil
-                }, perform: { _ in store.paste() })
+                .onCutCommand(
+                  perform: store.table == nil || !store.editable || store.locked
+                    ? nil : { store.clipboardProviders(cutting: true) }
+                )
+                .onPasteCommand(
+                  of: ["public.utf8-plain-text"],
+                  validator: { _ in
+                    store.editable && !store.locked && store.canPasteTable ? true : nil
+                  }, perform: { _ in store.paste() }
+                )
                 .gesture(
                   DragGesture(minimumDistance: 0)
                     .onChanged { drag(start: $0.startLocation, location: $0.location) }
@@ -633,9 +824,10 @@ private struct ERCanvasSurface: View {
     else { return [] }
     let p = port(a, right: true)
     let q = port(b, right: false)
-    let lane = store.graph.edges.filter {
-      $0.sourceTable == e.sourceTable && $0.destinationTable == e.destinationTable
-    }.firstIndex { $0.id == e.id } ?? 0
+    let lane =
+      store.graph.edges.filter {
+        $0.sourceTable == e.sourceTable && $0.destinationTable == e.destinationTable
+      }.firstIndex { $0.id == e.id } ?? 0
     if q.x > p.x + 50 && lane == 0 {
       let mid = (p.x + q.x) / 2
       return [p, CGPoint(x: mid, y: p.y), CGPoint(x: mid, y: q.y), q]
@@ -647,9 +839,11 @@ private struct ERCanvasSurface: View {
     ]
   }
   private func labelPoint(_ points: [CGPoint]) -> CGPoint? {
-    guard let (a, b) = zip(points, points.dropFirst()).max(by: {
-      hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) < hypot($1.0.x - $1.1.x, $1.0.y - $1.1.y)
-    }) else { return nil }
+    guard
+      let (a, b) = zip(points, points.dropFirst()).max(by: {
+        hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) < hypot($1.0.x - $1.1.x, $1.0.y - $1.1.y)
+      })
+    else { return nil }
     return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 12)
   }
   private func draw(_ ctx: inout GraphicsContext, size: CGSize) {
@@ -709,7 +903,9 @@ private struct ERCanvasSurface: View {
       circle(&ctx, port(t, right: false), selected: false)
       circle(&ctx, port(t, right: true), selected: store.pendingSource == t.id)
     }
-    if let source = store.pendingSource, let table = tables.first(where: { $0.id == source }), let linkPreview {
+    if let source = store.pendingSource, let table = tables.first(where: { $0.id == source }),
+      let linkPreview
+    {
       line([port(table, right: true), linkPreview], selected: true)
     }
   }
@@ -770,8 +966,11 @@ private struct ERCanvasSurface: View {
       }
     } else if store.pendingSource != nil {
       if !(startedConnection && tapped) {
-        if let target = hitTarget(p) { store.connect(to: target) }
-        else { store.pendingSource = nil }
+        if let target = hitTarget(p) {
+          store.connect(to: target)
+        } else {
+          store.pendingSource = nil
+        }
       }
     } else if tapped, let target = hitTarget(p) {
       selectCanvasTable(target, tapCount: tapCount)
@@ -781,7 +980,9 @@ private struct ERCanvasSurface: View {
         let points = route(e)
         if let label = labelPoint(points) {
           let q = screen(label)
-          if abs(location.x - q.x) <= max(22, 18 * scale) && abs(location.y - q.y) <= max(12, 10 * scale) {
+          if abs(location.x - q.x) <= max(22, 18 * scale)
+            && abs(location.y - q.y) <= max(12, 10 * scale)
+          {
             hit = e.id
             break
           }
@@ -944,7 +1145,9 @@ private struct ERScrollbar: View {
       let item = NSMenuItem(title: "", action: Selector(name), keyEquivalent: "")
       guard let target = NSApp.target(forAction: Selector(name)) else { return false }
       if let validator = target as? NSMenuItemValidation { return validator.validateMenuItem(item) }
-      if let validator = target as? NSUserInterfaceValidations { return validator.validateUserInterfaceItem(item) }
+      if let validator = target as? NSUserInterfaceValidations {
+        return validator.validateUserInterfaceItem(item)
+      }
       return true
     }
     private func textAction(_ name: String) { NSApp.sendAction(Selector(name), to: nil, from: nil) }
@@ -955,12 +1158,16 @@ private struct ERScrollbar: View {
             if textEditing { textAction("undo:") } else { store?.command("undo") }
           }
           .keyboardShortcut("z", modifiers: .command)
-          .disabled(textEditing ? !textEnabled("undo:") : store?.graph.canUndo != true || store?.editable != true)
+          .disabled(
+            textEditing
+              ? !textEnabled("undo:") : store?.graph.canUndo != true || store?.editable != true)
           Button("Redo") {
             if textEditing { textAction("redo:") } else { store?.command("redo") }
           }
           .keyboardShortcut("z", modifiers: [.command, .shift])
-          .disabled(textEditing ? !textEnabled("redo:") : store?.graph.canRedo != true || store?.editable != true)
+          .disabled(
+            textEditing
+              ? !textEnabled("redo:") : store?.graph.canRedo != true || store?.editable != true)
         }
       }
       CommandGroup(after: .pasteboard) {

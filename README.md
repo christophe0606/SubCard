@@ -28,6 +28,8 @@ separate details screen. The inspector supports **string, URL, date, time,
 date-time, binary coded decimal (BCD), float, integer, boolean and blob fields**,
 with **Allow NULL** and **Unique values** rules for every field, plus optional
 lookup indexes for suitable types. SQLite enforces required and unique values.
+Fields support a custom CHECK expression, and tables support multiple named CHECK
+constraints, with syntax validation before acceptance and a circled-cross delete control.
 Blobs can represent
 images (such as contact photos), videos, sounds or documents. Fields appear only
 in the inspector: the canvas represents tables and relationships. Full card/data
@@ -98,6 +100,7 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 ## Documentation
 
 - [Typed fields, indexes, exact decimals and blob purposes](documentation/features/typed-fields.md)
+- [Field and named table CHECK constraints](documentation/features/check-constraints.md)
 - [Entity relationship canvas, command architecture, design decisions, and tests](documentation/features/entity-relationship-canvas.md)
 - [Architecture and principles](documentation/architecture.md)
 - [Document lifecycle, global data states, modes, and schema locking](documentation/features/document-lifecycle.md)

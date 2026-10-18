@@ -9,6 +9,7 @@ enum EditorTests {
     await animatedReveal()
     newTableVisibility()
     typedFields()
+    customChecks()
     tableTapNavigation()
     independentDocuments()
     let document = subcard_document_new()!
@@ -52,7 +53,7 @@ enum EditorTests {
     assert(store.edge?.many == true)
     store.command("redo")
     assert(store.edge?.many == false)
-    store.select(edge: arrow.id) // Selecting an arrow never selects its hidden key or a table.
+    store.select(edge: arrow.id)  // Selecting an arrow never selects its hidden key or a table.
     store.deleteSelection()
     assert(store.graph.edges.isEmpty && store.graph.tables.count == 2)
     store.command("undo")
@@ -65,14 +66,16 @@ enum EditorTests {
     store.tableNameDraft = "Copy after editing"
     store.duplicate()
     assert(store.table?.name == "Copy after editing copy" && store.table?.fields.isEmpty == true)
-    assert(store.graph.edges.count == 1) // A duplicated table has no accidental relationships.
+    assert(store.graph.edges.count == 1)  // A duplicated table has no accidental relationships.
     store.tableNameDraft = ""
     store.commitNames()
     assert(store.error != nil && store.table?.name == "Copy after editing copy")
     assert(!store.hasDraft)
-    store.command("add_index", ["table": first.id, "name": "legacy reference", "kind": "secondary"])
+    store.command(
+      "add_index", ["table": first.id, "name": "legacy reference", "kind": "secondary"])
     let key = store.graph.tables.first!.fields.last!
-    store.command("connect", ["table": first.id, "field": key.id, "target": second.id, "targetField": 0])
+    store.command(
+      "connect", ["table": first.id, "field": key.id, "target": second.id, "targetField": 0])
     let legacy = store.graph.edges.last!
     store.select(edge: legacy.id)
     assert(store.relationshipTitle(legacy) == "Orders → Copy after editing")
@@ -82,6 +85,53 @@ enum EditorTests {
     store.commitNames()
     print("Editor name commits, table relationships, cardinality, selection and undo passed.")
   }
+  static func customChecks() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.addTable()
+    store.addField(.integer)
+    let table = store.table!.id
+    let field = store.field!
+    store.fieldNameDraft = "Age"
+    store.commitNames()
+    let before = store.graph.canUndo
+    assert(store.checkValidation("\"Age\" >= 0", table: table) == nil)
+    assert(store.checkValidation("\"Age\" >", table: table) != nil)
+    assert(store.checkValidation("\"Missing\" > 0", table: table) != nil)
+    assert(
+      store.error == nil && store.field?.check.isEmpty == true && store.graph.canUndo == before)
+    store.updateField(field, ["check": "\"Age\" >= 0"])
+    assert(store.field?.check == "f\(field.id) >= 0")
+    store.command(
+      "add_constraint", ["table": table, "name": "Adult", "expression": "\"Age\" >= 18"])
+    store.command(
+      "add_constraint", ["table": table, "name": "Age limit", "expression": "\"Age\" <= 150"])
+    assert(store.table?.constraints.count == 2)
+    store.fieldNameDraft = "Age in years"
+    store.commitNames()
+    assert(store.field?.checkDisplay == "\"Age in years\" >= 0")
+    assert(store.table?.constraints.first?.displayExpression == "\"Age in years\" >= 18")
+    store.duplicate()
+    assert(store.table?.constraints.count == 2)
+    let copiedField = store.table!.dataFields[0]
+    assert(copiedField.id != field.id && copiedField.check == "f\(copiedField.id) >= 0")
+    let copiedTable = store.table!.id
+    let constraint = store.table!.constraints[0]
+    store.command("delete_constraint", ["table": copiedTable, "id": constraint.id])
+    assert(store.table?.constraints.count == 1)
+    store.command("undo")
+    assert(store.table?.constraints.count == 2)
+    store.updateField(copiedField, ["check": ""])
+    store.selectField(copiedField.id)
+    assert(store.field?.check.isEmpty == true)
+    store.command("undo")
+    assert(store.field?.check.isEmpty == false)
+    store.document = nil
+    print(
+      "Constraint previews, field names, multiple named checks, copies, deletion and undo passed.")
+  }
   static func independentDocuments() {
     let firstDocument = subcard_document_new()!
     let secondDocument = subcard_document_new()!
@@ -89,7 +139,8 @@ enum EditorTests {
       subcard_document_close(firstDocument)
       subcard_document_close(secondDocument)
     }
-    let first = ERStore(), second = ERStore()
+    let first = ERStore()
+    let second = ERStore()
     first.attach(firstDocument, changed: {})
     second.attach(secondDocument, changed: {})
     first.addTable()
@@ -125,27 +176,30 @@ enum EditorTests {
     store.selectTableFromCanvas(first, tapCount: 1, compact: true)
     assert(store.selectedTable == first && !store.showDetails)
     store.selectTableFromCanvas(first, tapCount: 1, compact: true)
-    assert(!store.showDetails) // A later single tap is still selection only.
+    assert(!store.showDetails)  // A later single tap is still selection only.
     store.selectTableFromCanvas(first, tapCount: 2, compact: true)
     assert(store.selectedTable == first && store.showDetails)
-    store.showDetails = false // Return from the iPhone details screen.
+    store.showDetails = false  // Return from the iPhone details screen.
     store.selectTableFromCanvas(second, tapCount: 1, compact: true)
     assert(store.selectedTable == second && !store.showDetails)
     store.selectTableFromCanvas(first, tapCount: 1, compact: false)
-    assert(store.table?.id == first && !store.showDetails) // Adjacent desktop inspector.
+    assert(store.table?.id == first && !store.showDetails)  // Adjacent desktop inspector.
     assert(String(cString: subcard_document_er_json(document)!) == before)
     // Navigation commits an existing inspector draft to its original table.
     store.tableNameDraft = "People"
     store.selectTableFromCanvas(second, tapCount: 1, compact: true)
-    assert(store.graph.tables.first?.name == "People" && store.table?.id == second && !store.hasDraft)
+    assert(
+      store.graph.tables.first?.name == "People" && store.table?.id == second && !store.hasDraft)
     assert(subcard_document_set_mode(document, SUBCARD_MODE_USE) != 0)
     store.refresh()
     store.selectTableFromCanvas(first, tapCount: 1, compact: true)
     assert(store.table?.id == first && !store.showDetails)
     store.selectTableFromCanvas(first, tapCount: 2, compact: true)
-    assert(store.showDetails) // Read-only tables use the same selection/navigation policy.
+    assert(store.showDetails)  // Read-only tables use the same selection/navigation policy.
     store.document = nil
-    print("Compact single/double taps, desktop selection, use-mode selection and draft ownership passed.")
+    print(
+      "Compact single/double taps, desktop selection, use-mode selection and draft ownership passed."
+    )
   }
   static func typedFields() {
     let document = subcard_document_new()!
@@ -209,13 +263,16 @@ enum EditorTests {
     store.fieldNameDraft = "Homepage"
     store.updateField(url, ["nullable": false, "unique": true])
     assert(
-      store.field?.name == "Homepage" && store.field?.nullable == false && store.field?.unique == true
+      store.field?.name == "Homepage" && store.field?.nullable == false
+        && store.field?.unique == true
     )
     store.command("undo")
     assert(store.field?.nullable == true && store.field?.unique == false)
     store.command("redo")
     store.updateField(url, ["kind": "blob"])
-    assert(store.field?.indexed == false && store.field?.unique == true && store.field?.nullable == false)
+    assert(
+      store.field?.indexed == false && store.field?.unique == true && store.field?.nullable == false
+    )
     store.select(table: tableID)
     assert(store.selectedField == nil && store.fieldNameDraft.isEmpty)
     store.duplicate()
@@ -275,7 +332,7 @@ enum EditorTests {
     try? await Task.sleep(nanoseconds: 550_000_000)
     assert(abs(store.viewport.panX - interrupted.panX) < 1e-6)
     store.command("undo")
-    assert(store.graph.tables.count == 3) // The reveal never adds an undo step.
+    assert(store.graph.tables.count == 3)  // The reveal never adds an undo step.
     store.cancelReveal()
     store.document = nil
     print("Animated reveal continuity, interruption, save endpoints and undo passed.")
@@ -297,11 +354,12 @@ enum EditorTests {
         let left = (table.x - camera.panX) * scale
         let top = (table.y - camera.panY) * scale
         assert(left >= 24 - 1e-6 && left < store.canvasSize.width - 38)
-        assert(top >= 24 - 1e-6 && top + table.height * scale <= store.canvasSize.height - 38 + 1e-6)
+        assert(
+          top >= 24 - 1e-6 && top + table.height * scale <= store.canvasSize.height - 38 + 1e-6)
         assert(camera.zoom == zoom)
         assert(!store.showDetails)
         store.command("undo")
-        assert(store.graph.tables.count == count) // Reveal did not consume undo.
+        assert(store.graph.tables.count == count)  // Reveal did not consume undo.
         assert(store.graph.view.panX == camera.panX && store.graph.view.panY == camera.panY)
         store.command("redo")
         assert(store.graph.tables.count == count + 1)

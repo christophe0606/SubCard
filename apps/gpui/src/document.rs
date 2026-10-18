@@ -17,6 +17,11 @@ unsafe extern "C" {
     fn subcard_document_set_mode(doc: *mut c_void, mode: c_int) -> c_int;
     fn subcard_document_er_json(doc: *mut c_void) -> *const c_char;
     fn subcard_document_er_command(doc: *mut c_void, json: *const c_char) -> c_int;
+    fn subcard_document_validate_check(
+        doc: *mut c_void,
+        table: c_int,
+        expression: *const c_char,
+    ) -> c_int;
     fn subcard_last_error() -> *const c_char;
 }
 
@@ -59,6 +64,17 @@ impl Document {
     pub fn er_command(&mut self, value: serde_json::Value) -> Result<(), String> {
         let json = CString::new(value.to_string()).map_err(|_| "Invalid command")?;
         if unsafe { subcard_document_er_command(self.0.as_ptr(), json.as_ptr()) } == 0 {
+            Err(error())
+        } else {
+            Ok(())
+        }
+    }
+    pub fn validate_check(&self, table: i32, expression: &str) -> Result<(), String> {
+        let expression =
+            CString::new(expression).map_err(|_| "The expression contains a null character.")?;
+        if unsafe { subcard_document_validate_check(self.0.as_ptr(), table, expression.as_ptr()) }
+            == 0
+        {
             Err(error())
         } else {
             Ok(())

@@ -36,9 +36,13 @@ struct ERField: Codable, Identifiable {
   var nullable: Bool = true
   var media: String = "binary"
   var scale: Int = 2
+  var check: String = ""
+  var checkDisplay: String = ""
   var datatype: ERDatatype? { ERDatatype(rawValue: kind) }
   var typeTitle: String { datatype?.title ?? kind }
-  enum CodingKeys: String, CodingKey { case id, name, kind, unique, indexed, nullable, media, scale }
+  enum CodingKeys: String, CodingKey {
+    case id, name, kind, unique, indexed, nullable, media, scale, check, checkDisplay
+  }
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = try c.decode(Int.self, forKey: .id)
@@ -50,6 +54,22 @@ struct ERField: Codable, Identifiable {
     nullable = try c.decodeIfPresent(Bool.self, forKey: .nullable) ?? true
     media = try c.decodeIfPresent(String.self, forKey: .media) ?? "binary"
     scale = try c.decodeIfPresent(Int.self, forKey: .scale) ?? 2
+    check = try c.decodeIfPresent(String.self, forKey: .check) ?? ""
+    checkDisplay = try c.decodeIfPresent(String.self, forKey: .checkDisplay) ?? check
+  }
+}
+struct ERConstraint: Codable, Identifiable {
+  var id: Int
+  var name: String
+  var expression: String
+  var displayExpression: String
+  enum CodingKeys: String, CodingKey { case id, name, expression, displayExpression }
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(Int.self, forKey: .id)
+    name = try c.decode(String.self, forKey: .name)
+    expression = try c.decode(String.self, forKey: .expression)
+    displayExpression = try c.decodeIfPresent(String.self, forKey: .displayExpression) ?? expression
   }
 }
 struct ERTable: Codable, Identifiable {
@@ -59,6 +79,18 @@ struct ERTable: Codable, Identifiable {
   var x: Double
   var y: Double
   var fields: [ERField]
+  var constraints: [ERConstraint] = []
+  enum CodingKeys: String, CodingKey { case id, name, color, x, y, fields, constraints }
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(Int.self, forKey: .id)
+    name = try c.decode(String.self, forKey: .name)
+    color = try c.decode(String.self, forKey: .color)
+    x = try c.decode(Double.self, forKey: .x)
+    y = try c.decode(Double.self, forKey: .y)
+    fields = try c.decode([ERField].self, forKey: .fields)
+    constraints = try c.decodeIfPresent([ERConstraint].self, forKey: .constraints) ?? []
+  }
   var height: Double { 64 }
   var dataFields: [ERField] { fields.filter { $0.datatype != nil } }
 }
@@ -185,6 +217,13 @@ final class ERStore: ObservableObject {
     values["id"] = f.id
     command("update_field", values)
   }
+  func checkValidation(_ expression: String, table: Int) -> String? {
+    guard let document else { return "The document is closed." }
+    if subcard_document_validate_check(document, Int32(table), expression) == 0 {
+      return String(cString: subcard_last_error())
+    }
+    return nil
+  }
   func command(_ op: String, _ properties: [String: Any] = [:]) {
     commitNames()
     cancelReveal()
@@ -278,19 +317,19 @@ final class ERStore: ObservableObject {
     return text
   }
   #if os(macOS)
-  var canPasteTable: Bool {
-    guard let text = NSPasteboard.general.string(forType: .string),
-      let data = text.data(using: .utf8),
-      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return false }
-    return obj["subcardTable"] as? Int == 1 && obj["table"] != nil
-  }
-  func clipboardProviders(cutting: Bool = false) -> [NSItemProvider] {
-    guard let text = clipboardText() else { return [] }
-    let providers = [NSItemProvider(object: text as NSString)]
-    if cutting, editable, !locked { deleteSelection() }
-    return providers
-  }
+    var canPasteTable: Bool {
+      guard let text = NSPasteboard.general.string(forType: .string),
+        let data = text.data(using: .utf8),
+        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else { return false }
+      return obj["subcardTable"] as? Int == 1 && obj["table"] != nil
+    }
+    func clipboardProviders(cutting: Bool = false) -> [NSItemProvider] {
+      guard let text = clipboardText() else { return [] }
+      let providers = [NSItemProvider(object: text as NSString)]
+      if cutting, editable, !locked { deleteSelection() }
+      return providers
+    }
   #endif
   private func copyToClipboard() -> Bool {
     guard let text = clipboardText() else { return false }

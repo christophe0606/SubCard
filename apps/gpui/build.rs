@@ -16,6 +16,14 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sqlite.display());
     println!(
         "cargo:rerun-if-changed={}",
+        backend.join("src/CheckExpression.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/CheckExpression.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         backend.join("src/UserData.cpp").display()
     );
     println!(
@@ -44,6 +52,7 @@ fn main() {
         .file(backend.join("src/Document.cpp"))
         .file(backend.join("src/UserData.cpp"))
         .file(backend.join("src/ERModel.cpp"))
+        .file(backend.join("src/CheckExpression.cpp"))
         .warnings(true)
         .compile("subcard_core");
 

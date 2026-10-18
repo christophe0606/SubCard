@@ -7,7 +7,7 @@ mkdir -p "$SUBCARD_BUILD/tests"
     -DSQLITE_DQS=0 -DSQLITE_TEMP_STORE=3 -I "$SUBCARD_ROOT/vendor/sqlite/include" \
     -c "$SUBCARD_ROOT/vendor/sqlite/src/sqlite3.c" -o "$SUBCARD_BUILD/tests/sqlite3.o"
 core_objects=("$SUBCARD_BUILD/tests/sqlite3.o")
-for source in Document UserData ERModel SubCardCore; do
+for source in Document UserData CheckExpression ERModel SubCardCore; do
     object="$SUBCARD_BUILD/tests/$source.o"
     "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I "$SUBCARD_ROOT/backend/include" \
         -I "$SUBCARD_ROOT/vendor/sqlite/include" -c "$SUBCARD_ROOT/backend/src/$source.cpp" -o "$object"

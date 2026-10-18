@@ -53,12 +53,16 @@ int subcard_document_discard_fake_data(SubCardDocument* document);
 // Save (including Save As) is a no-op while unchanged. Failure preserves edits.
 int subcard_document_save(SubCardDocument* document, const char* path);
 
-// ER graph/viewport JSON: version 4 with field rules, 3 with typed fields, otherwise 2.
-// Opens versions 1-4. Borrowed until next call/mutation.
+// ER graph/viewport JSON: version 5 with custom CHECKs, 4 with field rules,
+// 3 with typed fields, otherwise 2. Opens versions 1-5.
+// Borrowed until next call/mutation.
 // Command API is shared by frontends and future scripting adapters. See the ER
 // architecture document for the command contract. View changes skip undo history.
 const char* subcard_document_er_json(SubCardDocument* document);
 int subcard_document_er_command(SubCardDocument* document, const char* command);
+// Validate a scalar CHECK expression using visible field names, without writing
+// data or history. Returns 1 if valid, otherwise 0 and subcard_last_error().
+int subcard_document_validate_check(const SubCardDocument* document, int table, const char* expression);
 
 // Immutable, owned full-database snapshot for platform-managed file writers.
 // Taking/canceling a snapshot does not change the document's path or dirty state.

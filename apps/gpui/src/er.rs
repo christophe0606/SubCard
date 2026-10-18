@@ -49,6 +49,10 @@ pub struct Field {
     pub media: String,
     #[serde(default = "default_scale")]
     pub scale: u32,
+    #[serde(default)]
+    pub check: String,
+    #[serde(default, rename = "checkDisplay")]
+    pub check_display: String,
 }
 impl Field {
     fn ordinary(&self) -> bool {
@@ -66,6 +70,14 @@ impl Field {
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub struct Constraint {
+    pub id: i32,
+    pub name: String,
+    pub expression: String,
+    #[serde(default, rename = "displayExpression")]
+    pub display_expression: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Table {
     pub id: i32,
     pub name: String,
@@ -73,6 +85,8 @@ pub struct Table {
     pub x: f64,
     pub y: f64,
     pub fields: Vec<Field>,
+    #[serde(default)]
+    pub constraints: Vec<Constraint>,
 }
 impl Table {
     fn height(&self) -> f64 {
@@ -174,6 +188,11 @@ struct Reveal {
     to: Viewport,
     began: Instant,
 }
+#[derive(Clone, Copy, PartialEq)]
+enum CheckTarget {
+    Field(i32),
+    Table(Option<i32>),
+}
 pub struct ERState {
     pub graph: Graph,
     reveal: Option<Reveal>,
@@ -186,6 +205,9 @@ pub struct ERState {
     field_name: Entity<TextInput>,
     field_baseline: String,
     field_menu: Option<bool>, // true: add; false: change datatype.
+    check_editor: Option<CheckTarget>,
+    check_name: Entity<TextInput>,
+    check_expression: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
     pending: Option<i32>,
     link_start: Option<(f64, f64)>,
@@ -202,6 +224,18 @@ impl ERState {
         let field_name =
             cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Field name"));
         let mut subscriptions = Vec::new();
+        let check_name =
+            cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Constraint name"));
+        let check_expression =
+            cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("CHECK expression"));
+        for input in [&check_name, &check_expression] {
+            subscriptions.push(cx.observe(input, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |s, _, _: &crate::text_input::Submitted, _, cx| s.er_apply_check(cx),
+            ));
+        }
         for input in [&name, &field_name] {
             subscriptions.push(cx.on_blur(&input.focus_handle(cx), window, |s, _, cx| {
                 s.er_commit_names(cx)
@@ -229,6 +263,9 @@ impl ERState {
             field_name,
             field_baseline: String::new(),
             field_menu: None,
+            check_editor: None,
+            check_name,
+            check_expression,
             pending: None,
             link_start: None,
             drag: None,
@@ -383,7 +420,188 @@ fn button(
             }
         }))
 }
+fn remove_check_button(
+    id: String,
+    enabled: bool,
+    cx: &mut Context<SubCardView>,
+    action: impl Fn(&mut SubCardView, &mut Window, &mut Context<SubCardView>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .size(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(0xe5eaf1))
+        .text_color(rgb(0xb42318))
+        .text_size(px(20.))
+        .child("×")
+        .cursor_pointer()
+        .when(!enabled, |d| d.opacity(0.4))
+        .on_click(cx.listener(move |s, _, w, cx| {
+            if enabled {
+                action(s, w, cx);
+            }
+        }))
+}
 impl SubCardView {
+    fn er_edit_check(&mut self, target: CheckTarget, cx: &mut Context<Self>) {
+        self.er_commit_names(cx);
+        let Some(t) = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)
+        else {
+            return;
+        };
+        let (name, expression) = match target {
+            CheckTarget::Field(id) => (
+                String::new(),
+                t.fields
+                    .iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.check_display.clone())
+                    .unwrap_or_default(),
+            ),
+            CheckTarget::Table(id) => t
+                .constraints
+                .iter()
+                .find(|c| Some(c.id) == id)
+                .map(|c| (c.name.clone(), c.display_expression.clone()))
+                .unwrap_or_default(),
+        };
+        self.er.check_editor = Some(target);
+        self.er
+            .check_name
+            .update(cx, |i, cx| i.set_content(name, cx));
+        self.er
+            .check_expression
+            .update(cx, |i, cx| i.set_content(expression, cx));
+        cx.notify();
+    }
+    fn er_check_error(&self, cx: &App) -> Option<String> {
+        let t = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)?;
+        if let Err(e) = self
+            .document
+            .validate_check(t.id, self.er.check_expression.read(cx).content.as_ref())
+        {
+            return Some(e);
+        }
+        if let Some(CheckTarget::Table(id)) = self.er.check_editor {
+            let name = self.er.check_name.read(cx).content.as_ref();
+            if name.trim().is_empty() {
+                return Some("Enter a constraint name.".into());
+            }
+            if name.len() > 128 || name.chars().any(|c| c < ' ' || c == '\u{7f}') {
+                return Some(
+                    "Use a name of at most 128 UTF-8 bytes without control characters.".into(),
+                );
+            }
+            if t.constraints
+                .iter()
+                .any(|c| Some(c.id) != id && c.name.to_lowercase() == name.to_lowercase())
+            {
+                return Some("This table already has a constraint with that name.".into());
+            }
+        }
+        None
+    }
+    fn er_apply_check(&mut self, cx: &mut Context<Self>) {
+        if self.document.schema_locked()
+            || self.document.using_document()
+            || self.er_check_error(cx).is_some()
+        {
+            return;
+        }
+        let Some(table) = self.er.selected else {
+            return;
+        };
+        let expression = self.er.check_expression.read(cx).content.to_string();
+        let value = match self.er.check_editor {
+            Some(CheckTarget::Field(id)) => {
+                json!({"op":"update_field","table":table,"id":id,"check":expression})
+            }
+            Some(CheckTarget::Table(None)) => {
+                json!({"op":"add_constraint","table":table,"name":self.er.check_name.read(cx).content.to_string(),"expression":expression})
+            }
+            Some(CheckTarget::Table(Some(id))) => {
+                json!({"op":"update_constraint","table":table,"id":id,"name":self.er.check_name.read(cx).content.to_string(),"expression":expression})
+            }
+            None => return,
+        };
+        self.er_command(value, cx);
+        if self.error.is_none() {
+            self.er.check_editor = None;
+        }
+        cx.notify();
+    }
+    fn er_check_editor_panel(&self, enabled: bool, cx: &mut Context<Self>) -> Div {
+        let error = self.er_check_error(cx);
+        let mut editor = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .border_1()
+            .rounded_md()
+            .border_color(rgb(0x93b7ea));
+        if matches!(self.er.check_editor, Some(CheckTarget::Table(_))) {
+            editor = editor
+                .child("Constraint name")
+                .child(self.er.check_name.clone());
+        }
+        editor = editor.child("Expression").child(self.er.check_expression.clone())
+            .child("Enter only the expression, without CHECK(...). Quote field names with double quotes.");
+        if let Some(t) = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)
+        {
+            let fields = t
+                .fields
+                .iter()
+                .filter(|f| f.ordinary())
+                .map(|f| format!("\"{}\"", f.name.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            editor = editor.child(format!("Fields: id, {fields}"));
+        }
+        editor
+            .child(
+                div()
+                    .text_color(if error.is_some() {
+                        rgb(0xb42318)
+                    } else {
+                        rgb(0x258775)
+                    })
+                    .child(error.clone().unwrap_or_else(|| "Valid CHECK syntax".into())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button("Cancel", true, cx, |s, _, cx| {
+                        s.er.check_editor = None;
+                        cx.notify();
+                    }))
+                    .child(button(
+                        "Apply",
+                        enabled && error.is_none(),
+                        cx,
+                        |s, _, cx| s.er_apply_check(cx),
+                    )),
+            )
+    }
     pub fn er_refresh(&mut self) {
         match self
             .document
@@ -534,6 +752,7 @@ impl SubCardView {
         self.er.edge = edge;
         self.er.selected_field = None;
         self.er.field_menu = None;
+        self.er.check_editor = None;
         self.er_load_names(cx);
         w.focus(&self.er.focus);
         cx.notify();
@@ -542,6 +761,7 @@ impl SubCardView {
         self.er_commit_names(cx);
         self.er.selected_field = id;
         self.er.field_menu = None;
+        self.er.check_editor = None;
         self.er_load_names(cx);
         cx.notify();
     }
@@ -1353,6 +1573,25 @@ impl SubCardView {
                         }
                         details=details.child(purposes).child("Stored inside the stack, for example a person’s photo. Uniqueness compares the stored bytes.");
                     }
+                    details = details.child("CHECK constraint");
+                    if !f.check.is_empty() {
+                        details = details.child(div().flex().gap_2().items_start()
+                            .child(button(f.check_display.clone(), schema, cx, move |s, _, cx| s.er_edit_check(CheckTarget::Field(fid), cx)).flex_1().min_w_0())
+                            .child(remove_check_button(format!("remove-field-check-{fid}"), schema, cx, move |s, _, cx| {
+                                s.er.check_editor = None;
+                                s.er_command(json!({"op":"update_field","table":id,"id":fid,"check":""}), cx);
+                            })));
+                    } else {
+                        details = details.child(button(
+                            "Add CHECK expression",
+                            schema,
+                            cx,
+                            move |s, _, cx| s.er_edit_check(CheckTarget::Field(fid), cx),
+                        ));
+                    }
+                    if self.er.check_editor == Some(CheckTarget::Field(fid)) {
+                        details = details.child(self.er_check_editor_panel(schema, cx));
+                    }
                     details = details.child(button("Delete field", schema, cx, move |s, _, cx| {
                         s.er_command(json!({"op":"delete_field","table":id,"id":fid}), cx)
                     }));
@@ -1362,6 +1601,49 @@ impl SubCardView {
                         |element, progress| element.opacity(progress),
                     ));
                 }
+            }
+            panel = panel.child(
+                div()
+                    .border_t_1()
+                    .pt_2()
+                    .font_weight(FontWeight::BOLD)
+                    .child("Table CHECK constraints"),
+            );
+            for constraint in &t.constraints {
+                let cid = constraint.id;
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .items_start()
+                        .child(
+                            button(
+                                format!("{}: {}", constraint.name, constraint.display_expression),
+                                schema,
+                                cx,
+                                move |s, _, cx| s.er_edit_check(CheckTarget::Table(Some(cid)), cx),
+                            )
+                            .flex_1()
+                            .min_w_0(),
+                        )
+                        .child(remove_check_button(
+                            format!("remove-table-check-{cid}"),
+                            schema,
+                            cx,
+                            move |s, _, cx| {
+                                s.er.check_editor = None;
+                                s.er_command(
+                                    json!({"op":"delete_constraint","table":id,"id":cid}),
+                                    cx,
+                                );
+                            },
+                        )),
+                );
+            }
+            panel = panel.child(button("Add named constraint", schema && t.constraints.len() < 32, cx, |s, _, cx| s.er_edit_check(CheckTarget::Table(None), cx)))
+                .child("Every CHECK must pass. NULL results are accepted; use Allow NULL to require a field value.");
+            if matches!(self.er.check_editor, Some(CheckTarget::Table(_))) {
+                panel = panel.child(self.er_check_editor_panel(schema, cx));
             }
         } else {
             panel=panel.child("Select a table or relationship arrow to edit its properties.")
@@ -1615,6 +1897,38 @@ fn paint(
 mod viewport_tests {
     use super::{Table, Viewport};
     #[::core::prelude::v1::test]
+    fn custom_checks_validate_and_round_trip_through_shared_core() {
+        use crate::document::Document;
+        use serde_json::json;
+        let mut doc = Document::new().unwrap();
+        doc.er_command(json!({"op":"add_table","name":"People","x":10,"y":10}))
+            .unwrap();
+        doc.er_command(json!({"op":"add_field","table":1,"name":"Age","kind":"integer"}))
+            .unwrap();
+        assert!(doc.validate_check(1, "\"Age\" >= 0").is_ok());
+        assert!(doc.validate_check(1, "\"Age\" >").is_err());
+        assert!(doc.validate_check(1, "(SELECT 1)").is_err());
+        doc.er_command(json!({"op":"update_field","table":1,"id":2,"check":"\"Age\" >= 0"}))
+            .unwrap();
+        for (name, expression) in [("Adult", "\"Age\" >= 18"), ("Age limit", "\"Age\" <= 150")] {
+            doc.er_command(
+                json!({"op":"add_constraint","table":1,"name":name,"expression":expression}),
+            )
+            .unwrap();
+        }
+        let graph: serde_json::Value = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        let table: Table = serde_json::from_value(graph["tables"][0].clone()).unwrap();
+        assert_eq!(table.constraints.len(), 2);
+        assert_eq!(table.fields[0].check_display, "\"Age\" >= 0");
+        doc.er_command(json!({"op":"paste_table","table":table}))
+            .unwrap();
+        let graph: serde_json::Value = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        let copy: Table = serde_json::from_value(graph["tables"][1].clone()).unwrap();
+        assert_eq!(copy.fields[0].check, format!("f{} >= 0", copy.fields[0].id));
+        assert_eq!(copy.constraints[0].display_expression, "\"Age\" >= 18");
+        assert_ne!(copy.constraints[0].id, table.constraints[0].id);
+    }
+    #[::core::prelude::v1::test]
     fn relationship_direction_hidden_keys_and_parallel_routes() {
         use super::{Edge, Field, default_media, default_scale, label_position, route};
         let a = Table {
@@ -1632,7 +1946,10 @@ mod viewport_tests {
                 nullable: true,
                 media: default_media(),
                 scale: default_scale(),
+                check: String::new(),
+                check_display: String::new(),
             }],
+            constraints: vec![],
         };
         let b = Table {
             id: 2,
@@ -1641,6 +1958,7 @@ mod viewport_tests {
             x: 600.,
             y: 100.,
             fields: vec![],
+            constraints: vec![],
         };
         assert_eq!(a.height(), 64.);
         let edge = Edge {
@@ -1744,6 +2062,7 @@ mod viewport_tests {
                             x,
                             y,
                             fields: vec![],
+                            constraints: vec![],
                         };
                         let original = Viewport {
                             zoom,
@@ -1782,6 +2101,7 @@ mod viewport_tests {
             x: 50.,
             y: 60.,
             fields: vec![],
+            constraints: vec![],
         };
         let camera = Viewport {
             pan_x: 10.,

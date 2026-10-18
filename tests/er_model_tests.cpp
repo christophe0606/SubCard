@@ -388,12 +388,101 @@ void field_rules(const std::filesystem::path &directory) {
     assert(scalar(file, "SELECT f2 IS NULL FROM user_t1") == "1");
     std::cout << "Field nullability/uniqueness, all datatypes, history, locks and backward compatibility passed.\n";
 }
+void custom_checks(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Bookings","x":10,"y":10})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Start","kind":"integer"})"); // 2
+    cmd(d, R"({"op":"add_field","table":1,"name":"End","kind":"integer"})"); // 3
+    cmd(d, R"({"op":"add_field","table":1,"name":"Name","kind":"string"})"); // 4
+    const auto file = (directory / "custom-checks.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), file.c_str())); };
+    save();
+    const auto before = graph(d);
+    for (const char *expression : {
+        "\"Start\" >= 0", "\"End\" >= \"Start\"", "length(trim(\"Name\")) BETWEEN 1 AND 80",
+        "\"Name\" != 'Start;--/*' AND \"Name\" != 'it''s fine'",
+        "\"Start\" BETWEEN -1.5e2 AND 0xFF", "CAST(\"Start\" AS TEXT) != ''",
+        "CASE WHEN \"Start\" IS NULL THEN TRUE ELSE \"Start\" >= 0 END",
+        "length(x'00ff') = 2", "\"Name\" COLLATE NOCASE != 'bad'"}) {
+        if (!subcard_document_validate_check(d.get(), 1, expression)) {
+            std::cerr << expression << ": " << subcard_last_error() << '\n'; std::abort();
+        }
+    }
+    for (const char *expression : {
+        "\"Start\" >", "\"Missing\" >= 0", "missing", "(SELECT 1)", "sum(\"Start\")>0",
+        "random()", "load_extension('x')", "1); DROP TABLE document; --", "1) UNIQUE CHECK(1",
+        "1;SELECT 1", "\"Start\" >= ?", "\"Start\" > :n", "1-- comment", "'unfinished",
+        "CHECK(\"Start\">0)", "row_number() OVER () > 0", "", "   "})
+        assert(!subcard_document_validate_check(d.get(), 1, expression));
+    const auto tooLong = std::string(4097, '1');
+    assert(!subcard_document_validate_check(d.get(), 1, tooLong.c_str()));
+    assert(!subcard_document_validate_check(d.get(), 999, "1"));
+    assert(graph(d) == before && !subcard_document_is_changed(d.get()));
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"check":"\"Start\" >= 0"})");
+    cmd(d, R"({"op":"add_constraint","table":1,"name":"Date order","expression":"\"End\" >= \"Start\""})"); // 5
+    cmd(d, R"({"op":"add_constraint","table":1,"name":"Name length","expression":"length(trim(\"Name\")) BETWEEN 1 AND 10"})"); // 6
+    assert(graph(d).find("\"version\":5") != std::string::npos);
+    fail(d, R"({"op":"add_constraint","table":1,"name":"date ORDER","expression":"1"})");
+    fail(d, R"({"op":"add_constraint","table":1,"name":"","expression":"1"})");
+    fail(d, R"json({"op":"add_constraint","table":1,"name":"Bad","expression":"(SELECT 1)"})json");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"check":"1); DROP TABLE document; --"})");
+    fail(d, R"({"op":"update_constraint","table":1,"id":5,"expression":"unknown > 0"})");
+    fail(d, R"({"op":"update_constraint","table":1,"id":5,"name":"Name length"})");
+    fail(d, R"({"op":"delete_constraint","table":1,"id":999})");
+    fail(d, R"({"op":"delete_field","table":1,"id":3})"); // Referenced field stays intact.
+    save();
+    assert(scalar(file, "SELECT sql FROM sqlite_schema WHERE name='user_t1'").find("CONSTRAINT \"Date order\" CHECK(f3 >= f2)") != std::string::npos);
+    write(d, "INSERT INTO user_t1(f2,f3,f4) VALUES(1,2,'OK'); INSERT INTO user_t1 DEFAULT VALUES");
+    for (const char *statement : {
+        "INSERT INTO user_t1(f2) VALUES(-1)", "INSERT INTO user_t1(f2,f3) VALUES(2,1)",
+        "INSERT INTO user_t1(f4) VALUES('')", "UPDATE user_t1 SET f2=-1 WHERE id=1",
+        "UPDATE user_t1 SET f3=0 WHERE id=1", "UPDATE user_t1 SET f4='too long a name' WHERE id=1",
+        "INSERT INTO user_t1(f2) VALUES(3); UPDATE user_t1 SET f3=0 WHERE id=1"})
+        assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, statement));
+    fail(d, R"({"op":"delete_constraint","table":1,"id":5})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"check":""})");
+    save();
+    auto reopened = own(subcard_document_open(file.c_str()));
+    assert(scalar(file, "SELECT count(*) FROM user_t1") == "2");
+    // Labels can change with fake rows; canonical SQL and the original data survive.
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"name":"Start time"})");
+    assert(graph(d).find("Start time\\\" >= 0") != std::string::npos);
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"delete_constraint","table":1,"id":5})");
+    cmd(d, R"({"op":"undo"})");
+    cmd(d, R"({"op":"redo"})");
+    cmd(d, R"({"op":"undo"})");
+    cmd(d, R"({"op":"update_constraint","table":1,"id":5,"name":"Order check","expression":"\"End\" >= \"Start time\" + 1"})");
+    cmd(d, R"({"op":"update_constraint","table":1,"id":6,"expression":"\"Name\" != 'Start;--/*' AND \"Name\" != 'it''s fine'"})");
+    save();
+    auto quoted = own(subcard_document_open(file.c_str())); // Semicolons inside literals are not schema boundaries.
+    const auto copy = scalar(file, "SELECT json_extract(json,'$.tables[0]') FROM subcard_system_er_model");
+    cmd(d, "{\"op\":\"paste_table\",\"table\":" + copy + "}"); // table7, fields8/9/10, constraints11/12
+    save();
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].fields[0].check') FROM subcard_system_er_model") == "f8 >= 0");
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[1].constraints[0].expression') FROM subcard_system_er_model") == "f9 >= f8 + 1");
+    auto pasted = own(subcard_document_open(file.c_str()));
+    assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, "INSERT INTO user_t7(f8,f9) VALUES(2,2)"));
+    write(d, "INSERT INTO user_t7(f8,f9) VALUES(2,3)");
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"check":""})");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(file, "SELECT json_extract(json,'$.tables[0].fields[0].check') FROM subcard_system_er_model") == "f2 >= 0");
+    write(d, "INSERT INTO user_t1(f2,f3,f4) VALUES(1,2,'OK')", SUBCARD_DATA_REAL);
+    assert(subcard_document_set_mode(d.get(), SUBCARD_MODE_EDIT));
+    fail(d, R"({"op":"delete_constraint","table":1,"id":5})");
+    fail(d, R"({"op":"update_field","table":1,"id":2,"check":""})");
+    assert(subcard_document_validate_check(d.get(), 1, "\"Start time\" > 0")); // Read-only even when locked.
+    std::cout << "Custom field/table CHECK syntax, enforcement, quoting, renames, copies, history and locks passed.\n";
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
     table_relationships(argv[1]);
     typed_fields(argv[1]);
     field_rules(argv[1]);
+    custom_checks(argv[1]);
     auto file = (std::filesystem::path(argv[1]) / "er.subcard").string();
     std::filesystem::remove(file);
     auto d = own(subcard_document_new());
