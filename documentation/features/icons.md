@@ -18,6 +18,15 @@ the application bundle, and writes `CFBundleIconFile = SubCard.icns` into its
 generated Info.plist before code signing. This keeps both Mac frontends separate
 without changing the shared C++ backend or the GPUI Linux build path.
 
+The Mac bundles also contain their variant's native `Assets.car` and declare
+`CFBundleIconName = SubCard`. The original `.icns`-only presentation was observed
+in Tahoe Finder as a small blue icon inside a large gray system tile. Native
+Icon Composer packaging supplies the system enclosure directly. The shared
+`assets/icons/macos-composition.json` scales the existing artwork by 1.25 over
+a blue background; the PNG masters and iPhone icon stay unchanged. Xcode's
+`actool` compiles both the native catalog and backward-compatible `.icns`.
+See [Apple's Icon Composer workflow](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer).
+
 After signing, the Mac builder updates the enclosing `.app` modification date.
 Replacing files inside `Contents` alone leaves that date unchanged, so macOS may
 retain registration and icon data from an earlier development bundle. Before
@@ -35,8 +44,10 @@ verifier checks the compiled catalog, home-screen PNGs and primary icon name.
 
 Generated masters and exported delivery assets are checked in so ordinary builds
 do not regenerate artwork or need an image service. Run
-`./scripts/prepare-icons.sh` only after changing the PNG masters. Temporary icon
-sets stay on the external checkout in `.build/icons/`. Account, device and
+`./scripts/prepare-icons.sh` after changing the PNG masters or Mac composition. Temporary icon
+packages and compiler outputs stay on the external checkout in `.build/icons/`.
+Regeneration requires Xcode 26 or later; ordinary builds copy the checked-in
+catalogs and `.icns` files. Account, device and
 signing identifiers are not stored with the icons.
 
 ## Verification
@@ -59,3 +70,10 @@ regular application activation policy and the expected separate bundle paths,
 and the SwiftUI icon obtained through `NSRunningApplication.icon` contained the
 book/grid artwork. The GPUI Dock icon was visually confirmed by the user. Both
 bundle signatures remained valid; no global cache reset was used.
+
+After native catalog packaging replaced the legacy-only icons, both Mac
+frontends rebuilt and passed strict code-signature verification. Their bundled
+catalogs and fallback icons matched the checked-in variant assets, and both
+declared the native icon name. After refreshing each bundle's Launch Services
+registration, both SwiftUI and GPUI icons were visually checked in Tahoe Finder:
+the blue artwork fills the system enclosure with no large gray surround.

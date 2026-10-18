@@ -100,4 +100,5 @@ iPhone guide for device prerequisites and verification status.
 
 The Mac bundles and iPhone target use the checked-in [application icons](features/icons.md).
 After changing a PNG master, regenerate the native delivery formats with
-`./scripts/prepare-icons.sh`; intermediate icon sets stay in `.build/icons/`.
+`./scripts/prepare-icons.sh` with Xcode 26 or later; intermediate Icon Composer
+packages and compiled catalogs stay in `.build/icons/`.

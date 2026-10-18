@@ -10,6 +10,8 @@ bundle_macos() {
     cp "$executable" "$bundle/Contents/MacOS/SubCard"
     cp "$SUBCARD_ROOT/assets/icons/mac-$variant.icns" \
         "$bundle/Contents/Resources/SubCard.icns"
+    cp "$SUBCARD_ROOT/assets/icons/mac-$variant.car" \
+        "$bundle/Contents/Resources/Assets.car"
     cp "$SUBCARD_ROOT/LICENSE" "$SUBCARD_ROOT/THIRD_PARTY_NOTICES.md" \
         "$bundle/Contents/Resources/"
     cp -R "$SUBCARD_ROOT/licenses" "$bundle/Contents/Resources/"
@@ -20,6 +22,7 @@ bundle_macos() {
     <key>CFBundleExecutable</key><string>SubCard</string>
     <key>CFBundleName</key><string>SubCard</string>
     <key>CFBundleIconFile</key><string>SubCard.icns</string>
+    <key>CFBundleIconName</key><string>SubCard</string>
     <key>CFBundleDisplayName</key><string>SubCard</string>
     <key>CFBundleIdentifier</key><string>org.subcard.$variant</string>
     <key>CFBundlePackageType</key><string>APPL</string>
