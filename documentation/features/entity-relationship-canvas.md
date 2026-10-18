@@ -48,6 +48,80 @@ contains no key fields, field-key ports, index editor, Unique toggle or SQL key
 names. Indexes on ordinary data fields remain future work. Parallel relationships
 have separate routes, and self references and cycles remain supported.
 
+### Relationship role names
+
+The connection edit panel in SwiftUI (macOS and iPhone) and GPUI provides:
+
+- **Reference name**: the field name in the destination table B, for both 1:N
+  and 1:1. For example, Colors → Products can name this reference **Color**.
+  New relationships initially use the source table's name; edit it to describe
+  the role. Explicit reference names must contain 1–128 UTF-8 bytes, without
+  control characters or whitespace-only values.
+- **Inverse name (optional)**: the reverse role in the source table A. For
+  People → Passports, the reference might be **Holder** and the inverse
+  **Passport**. Clear the inverse name to omit it. Nonempty inverse names use
+  the same validation as reference names.
+
+The canvas displays the reference near the **destination** endpoint. For **1:N**
+this is the only role name shown. For **1:1**, a nonempty inverse name also appears
+near the **source** endpoint. The reference is still physically stored in B;
+showing both roles does not create a second reference column. Switching
+cardinality retains both names, including the inverse hidden by a 1:N arrow.
+
+Names use measured, single-line text with ellipsis for long labels; the full
+value remains editable in the panel. Placement reserves clearance from every
+table/view card and previously placed role label, moving above obstacles when
+tables are close, reversed or connected to themselves. Label rectangles take
+zoom/calibration into account and are clickable to select the connection.
+Cardinality is centered at half the full routed arrow length, including straight
+arrows with a zero-length middle segment and bent/self routes. Its measured
+bounds are reserved when placing endpoint names, so role labels cannot cover
+the 1:N or 1:1 text. Label placement does not move tables. Fit includes role labels.
+
+Both names participate in document save/reopen and undo/redo. Drafts commit on
+Return, focus/selection changes and document lifecycle actions, just like table
+names. They are schema labels: naming is disabled after real data locks the
+schema. Name-only changes preserve fake rows and stable SQL keys without DDL.
+These names prepare future relationship selectors; they do not yet implement
+dropdowns, radio groups, choice-label columns or data-entry controls. Role names
+are not currently required to be unique within a table.
+
+Named relationships use graph metadata **version 7**, including when combined
+with views. Versions 1–6 remain readable; absent names decode as empty and leave
+existing physical columns intact. Legacy field edges use their conceptual
+direction (reference at the child/destination, inverse at the parent/source).
+An old unnamed relationship can be named in the panel. Older SubCard versions
+reject version 7 rather than silently losing the names.
+
+Validation on 2026-10-18 covers C++ name persistence/validation, partial updates,
+undo/redo, old unnamed metadata, stable references and fake-row preservation;
+SwiftUI draft ownership and commit behavior; and Swift/GPUI label clearance and
+whole-path midpoint geometry. Both macOS apps were built and checked with the
+native UI. The iPhoneOS app was compiled, signed, installed and launched on the
+user's physical iPhone; device interaction testing is being performed by the user.
+
+### Arrowhead zoom and iPhone table placement
+
+Connection arrowheads use model-space geometry in SwiftUI and GPUI, so their
+length and width scale with zoom and display calibration just like the table
+ports. An arrow's tip stops outside the destination circle, with a one-unit
+gap beyond its six-unit radius; the circle cannot hide the arrowhead at high
+zoom. A connection preview ends at the pointer, since it has no target port yet.
+
+On iPhone, Add Table places the new table **below** the selected table in a
+portrait canvas and **to its right** in landscape. With no table selected, the
+most recently created table is the anchor. Occupied positions are skipped in
+that direction, including view cards. The first table starts near the current
+viewport; rotation affects subsequent insertions without rearranging existing
+tables. Desktop placement retains its existing layout. The new table remains
+selected on the canvas, and the existing animated reveal preserves zoom and
+adds no undo step beyond the table creation itself.
+
+Swift geometry tests cover port clearance across zoom/calibration, and editor
+tests exercise portrait/landscape placement, rotation, occupied slots, selection
+and undo/redo. Physical-iPhone builds are used for validation; no simulator is
+installed or run.
+
 Physical SQL names use stable IDs independently of editable labels. Every table
 has a hidden `id INTEGER PRIMARY KEY AUTOINCREMENT`. A new relationship with ID E
 from A to B generates a hidden nullable `r<E> INTEGER REFERENCES user_t<A>(id)`
@@ -65,9 +139,10 @@ Duplicating/copying a table does not copy its relationships or generated keys.
 
 ### Existing documents and versioning
 
-Graph metadata and snapshots now use **version 2**. The loader also accepts
-version 1. The version bump prevents older binaries from silently interpreting
-table arrows as field-based foreign keys.
+Conceptual table arrows use at least **version 2** metadata; role names require
+**version 7** as described above. The loader accepts versions 1–7, including the
+intermediate typed-field, constraint and view formats. Version 2 prevents older
+binaries from silently interpreting table arrows as field-based foreign keys.
 
 Existing field-based keys, indexes, constraints and rows are preserved. Their
 metadata still uses `index` / `secondary` field kinds and nonzero edge `field`

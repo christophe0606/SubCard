@@ -127,6 +127,23 @@ struct EREdge: Codable, Identifiable {
   var targetField: Int
   var many: Bool
   var cascade: Bool
+  var referenceName: String = ""
+  var inverseName: String = ""
+  enum CodingKeys: String, CodingKey {
+    case id, table, field, target, targetField, many, cascade, referenceName, inverseName
+  }
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(Int.self, forKey: .id)
+    table = try c.decode(Int.self, forKey: .table)
+    field = try c.decode(Int.self, forKey: .field)
+    target = try c.decode(Int.self, forKey: .target)
+    targetField = try c.decode(Int.self, forKey: .targetField)
+    many = try c.decode(Bool.self, forKey: .many)
+    cascade = try c.decode(Bool.self, forKey: .cascade)
+    referenceName = try c.decodeIfPresent(String.self, forKey: .referenceName) ?? ""
+    inverseName = try c.decodeIfPresent(String.self, forKey: .inverseName) ?? ""
+  }
   // Older documents store foreign-key direction; present their conceptual direction.
   var sourceTable: Int { field == 0 ? table : target }
   var destinationTable: Int { field == 0 ? target : table }
@@ -163,7 +180,14 @@ final class ERStore: ObservableObject {
   @Published var pendingSource: Int?
   @Published var tableNameDraft = ""
   private var tableNameBaseline = ""
-  var hasDraft: Bool { tableNameDraft != tableNameBaseline || fieldNameDraft != fieldNameBaseline }
+  @Published var referenceNameDraft = ""
+  @Published var inverseNameDraft = ""
+  private var referenceNameBaseline = ""
+  private var inverseNameBaseline = ""
+  var hasDraft: Bool {
+    tableNameDraft != tableNameBaseline || fieldNameDraft != fieldNameBaseline
+      || referenceNameDraft != referenceNameBaseline || inverseNameDraft != inverseNameBaseline
+  }
   @Published var error: String?
   @Published var showDetails = false
   // Transient command routing; native text editing takes precedence over table actions.
@@ -173,6 +197,13 @@ final class ERStore: ObservableObject {
   private var revealTask: Task<Void, Never>?
   var viewport: ERViewport { animatedViewport ?? graph.view }
   var canvasSize = CGSize.zero
+  #if os(iOS)
+    var phoneTablePlacement = true
+  #else
+    var phoneTablePlacement = false
+  #endif
+  // Presentation cache for selecting the labels drawn by Canvas; never persisted.
+  var relationshipLabelBounds: [Int: [CGRect]] = [:]
   var document: OpaquePointer?
   var didChange: (() -> Void)?
   var editable: Bool { document.map { subcard_document_mode($0) == SUBCARD_MODE_EDIT } ?? false }
@@ -192,6 +223,7 @@ final class ERStore: ObservableObject {
       pendingSource = nil
       tableNameDraft = ""
       tableNameBaseline = ""
+      loadConnectionNames()
       showDetails = false
     }
     document = pointer
@@ -217,10 +249,26 @@ final class ERStore: ObservableObject {
       tableNameDraft = table?.name ?? dataView?.name ?? ""
       tableNameBaseline = tableNameDraft
     }
+    if edge == nil || (referenceNameDraft == referenceNameBaseline && inverseNameDraft == inverseNameBaseline) {
+      loadConnectionNames()
+    }
+  }
+  private func loadConnectionNames() {
+    referenceNameDraft = edge?.referenceName ?? ""
+    inverseNameDraft = edge?.inverseName ?? ""
+    referenceNameBaseline = referenceNameDraft
+    inverseNameBaseline = inverseNameDraft
   }
   // Drafts belong to the current selection. All model actions and document
   // lifecycle actions flush them before reading or replacing that selection.
   func commitNames() {
+    if let e = edge, referenceNameDraft != referenceNameBaseline || inverseNameDraft != inverseNameBaseline {
+      var values: [String: Any] = ["id": e.id, "inverseName": inverseNameDraft]
+      // Older unnamed relationships may acquire an inverse name independently.
+      if referenceNameDraft != referenceNameBaseline { values["referenceName"] = referenceNameDraft }
+      execute("update_connection", values)
+      loadConnectionNames()
+    }
     if let v = dataView, tableNameDraft != tableNameBaseline {
       execute("update_data_view", ["id": v.id, "name": tableNameDraft])
       tableNameDraft = dataView?.name ?? ""
@@ -291,6 +339,7 @@ final class ERStore: ObservableObject {
     commitNames()
     selectedTable = table
     selectedEdge = edge
+    loadConnectionNames()
     selectedField = nil
     fieldNameDraft = ""
     fieldNameBaseline = ""
@@ -331,12 +380,31 @@ final class ERStore: ObservableObject {
     let count = graph.tables.count
     var n = count + 1
     while graph.tables.contains(where: { $0.name.lowercased() == "table \(n)" }) { n += 1 }
+    var position = CGPoint(
+      x: min(100000, max(0, graph.view.panX + 60 + Double(count % 3) * 380)),
+      y: min(100000, max(0, graph.view.panY + 60 + Double(count / 3) * 200)))
+    if phoneTablePlacement, let anchor = table ?? graph.tables.last {
+      let portrait = canvasSize.height >= canvasSize.width
+      position = CGPoint(x: anchor.x + (portrait ? 0 : 380),
+                         y: anchor.y + (portrait ? anchor.height + 80 : 0))
+      // Adding from an earlier selection must not cover an existing table/view.
+      while graph.nodes.contains(where: {
+        CGRect(x: $0.x, y: $0.y, width: 320, height: $0.height).intersects(
+          CGRect(origin: position, size: CGSize(width: 320, height: 64)))
+      }) {
+        if portrait { position.y += 144 } else { position.x += 380 }
+      }
+      guard position.x <= 100000, position.y <= 100000 else {
+        error = "There is no room in this direction. Move a table before adding another."
+        return
+      }
+    }
     command(
       "add_table",
       [
         "name": "Table \(n)",
-        "x": min(100000, max(0, graph.view.panX + 60 + Double(graph.tables.count % 3) * 380)),
-        "y": min(100000, max(0, graph.view.panY + 60 + Double(graph.tables.count / 3) * 200)),
+        "x": position.x,
+        "y": position.y,
       ])
     guard graph.tables.count == count + 1, let added = graph.tables.last else { return }
     select(table: added.id, details: false)

@@ -5,6 +5,43 @@ import CoreGraphics
 @main
 enum ViewportTests {
   static func main() throws {
+    // A scaled arrowhead keeps the same size relative to the port, with its
+    // tip outside the port circle instead of hidden beneath it.
+    let destination = CGPoint(x: 100, y: 30)
+    let head = erArrowhead(destination)
+    for zoom in [0.25, 1.0, 4.0] {
+      for calibration in [0.25, 1.0, 4.0] {
+        let scale = zoom * calibration
+        assert((destination.x - head[1].x) * scale > 6 * scale)
+        assert(abs((head[1].x - head[0].x) * scale / (6 * scale) - 8.0 / 6) < 1e-9)
+      }
+    }
+    assert(erArrowhead(destination, hasPort: false)[1] == destination)
+    // Cardinality belongs halfway along the whole path, including when the
+    // middle segment has zero length or the longest segment is off center.
+    let straight = [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0),
+                    CGPoint(x: 100, y: 0), CGPoint(x: 200, y: 0)]
+    assert(erRouteMidpoint(straight) == CGPoint(x: 100, y: 0))
+    assert(erRouteMidpoint([CGPoint(x: 0, y: 0), CGPoint(x: 20, y: 0), CGPoint(x: 20, y: 100)])
+      == CGPoint(x: 20, y: 40))
+    assert(erRouteMidpoint([]) == nil)
+    // Labels must clear cards and each other for narrow gaps, self links,
+    // reversed endpoints, long labels, zoom and display calibration.
+    let cards = [CGRect(x: 10, y: 100, width: 320, height: 64),
+                 CGRect(x: 355, y: 100, width: 320, height: 64),
+                 CGRect(x: 0, y: 20, width: 320, height: 64)]
+    for scale in [0.01, 0.25, 1.0, 4.0, 16.0] {
+      var obstacles = cards
+      for endpoint in [CGPoint(x: 355, y: 130), CGPoint(x: 10, y: 130), CGPoint(x: 330, y: 130)] {
+        for source in [false, true] {
+          let rect = erEndpointLabelRect(endpoint: endpoint, source: source,
+            size: CGSize(width: 190 / scale, height: 25 / scale), obstacles: obstacles,
+            gap: max(8, 5 / scale))
+          assert(obstacles.allSatisfy { !$0.intersects(rect) })
+          obstacles.append(rect)
+        }
+      }
+    }
     // Check the externally visible invariant: the world point under the initial
     // finger midpoint must still project to that same screen point after zoom.
     for zoom in [0.0001, 0.25, 1.0, 4.0] {

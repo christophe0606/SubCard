@@ -81,7 +81,7 @@ void table_relationships(const std::filesystem::path &directory) {
     const auto path = (directory / "table-relationships.subcard").string();
     auto save = [&] { assert(subcard_document_save(d.get(), path.c_str())); };
     save();
-    assert(graph(d).find("\"version\":2") != std::string::npos);
+    assert(graph(d).find("\"version\":7") != std::string::npos);
     assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t1')") == "1");
     assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2')") == "2");
     assert(scalar(path, "SELECT json_array([table],[from],[to]) FROM pragma_foreign_key_list('user_t2')") ==
@@ -176,6 +176,57 @@ void table_relationships(const std::filesystem::path &directory) {
     assert(scalar(legacyPath, "SELECT [table] FROM pragma_foreign_key_list('user_t2')") == "user_t1");
     assert(scalar(legacyPath, "SELECT json_extract(json,'$.version') FROM subcard_system_er_model") == "2");
     std::cout << "Table relationship direction, automatic indexes, cardinality, history and persistence passed.\n";
+}
+void relationship_names(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Colors","x":10,"y":10})");
+    cmd(d, R"({"op":"add_table","name":"Products","x":500,"y":10})");
+    cmd(d, R"({"op":"add_connection","table":1,"target":2})");
+    assert(graph(d).find("\"referenceName\":\"Colors\"") != std::string::npos);
+    cmd(d, R"({"op":"update_connection","id":3,"referenceName":"Couleur 🟢","inverseName":"Products"})");
+    const auto named = graph(d);
+    cmd(d, R"({"op":"undo"})");
+    assert(graph(d).find("Couleur") == std::string::npos);
+    cmd(d, R"({"op":"redo"})");
+    assert(graph(d) == named);
+    cmd(d, R"({"op":"update_connection","id":3,"many":false})");
+    assert(graph(d).find("\"referenceName\":\"Couleur 🟢\"") != std::string::npos);
+    assert(graph(d).find("\"inverseName\":\"Products\"") != std::string::npos);
+    cmd(d, R"({"op":"update_connection","id":3,"many":true})");
+    for (const auto *bad : {
+        R"({"op":"update_connection","id":3,"referenceName":""})",
+        R"({"op":"update_connection","id":3,"referenceName":"   "})",
+        R"({"op":"update_connection","id":3,"inverseName":"\n"})",
+        R"({"op":"update_connection","id":3,"referenceName":null})",
+        R"({"op":"add_connection","table":1,"target":2,"referenceName":""})"}) fail(d, bad);
+    fail(d, "{\"op\":\"update_connection\",\"id\":3,\"referenceName\":\"" + std::string(129, 'x') + "\"}");
+    const auto path = (directory / "relationship-names.subcard").string();
+    assert(subcard_document_save(d.get(), path.c_str()));
+    auto reopened = own(subcard_document_open(path.c_str()));
+    assert(graph(reopened).find("Couleur 🟢") != std::string::npos);
+    // Renaming must preserve the physical key, fake rows and their IDs (no DDL).
+    write(d, "INSERT INTO user_t1 DEFAULT VALUES; INSERT INTO user_t2(r3) VALUES(1),(1)");
+    cmd(d, R"({"op":"update_connection","id":3,"referenceName":"Color","inverseName":""})");
+    assert(subcard_document_save(d.get(), path.c_str()));
+    assert(scalar(path, "SELECT group_concat(r3) FROM user_t2") == "1,1");
+    assert(scalar(path, "SELECT json_extract(json,'$.edges[0].inverseName') FROM subcard_system_er_model") == "");
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t2') WHERE name='r3'") == "1");
+    cmd(d, R"({"op":"undo"})");
+    assert(graph(d).find("Couleur 🟢") != std::string::npos);
+    // Old metadata has neither name; opening it must not rewrite its SQL keys.
+    reopened.reset();
+    sql(path, "UPDATE subcard_system_er_model SET json=json_remove(json_set(json,'$.version',2),'$.edges[0].referenceName','$.edges[0].inverseName')");
+    auto old = own(subcard_document_open(path.c_str()));
+    assert(graph(old).find("\"referenceName\":\"\"") != std::string::npos);
+    cmd(old, R"({"op":"update_connection","id":3,"inverseName":"Products"})");
+    cmd(old, R"({"op":"update_connection","id":3,"referenceName":"Color"})");
+    assert(subcard_document_save(old.get(), path.c_str()));
+    assert(scalar(path, "SELECT group_concat(r3) FROM user_t2") == "1,1");
+    assert(subcard_document_discard_fake_data(old.get()));
+    write(old, "INSERT INTO user_t1 DEFAULT VALUES", SUBCARD_DATA_REAL);
+    fail(old, R"({"op":"update_connection","id":3,"referenceName":"Locked"})");
+    fail(old, R"({"op":"update_connection","id":3,"inverseName":"Locked"})");
+    std::cout << "Relationship names, partial updates, validation, history, old metadata and row preservation passed.\n";
 }
 // Ordinary fields exist only in the inspector; the core owns their persistent schema.
 void typed_fields(const std::filesystem::path &directory) {
@@ -579,6 +630,7 @@ int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
     table_relationships(argv[1]);
+    relationship_names(argv[1]);
     typed_fields(argv[1]);
     field_rules(argv[1]);
     custom_checks(argv[1]);

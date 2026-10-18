@@ -21,7 +21,9 @@ The editor includes an **entity relationship canvas** for the user data model.
 Create tables and draw arrows from A to B to mean “A has one/many B.” Select an
 arrow to switch between **1:1** and **1:N** during schema design. Keys and indexes
 are hidden and generated automatically. Edit table names and colors in the
-inspector, and choose cascade/block deletion for one-to-many relationships. Pan, zoom, fit, calibrated 100% scale,
+inspector, name reference and optional inverse roles, and choose cascade/block
+deletion for one-to-many relationships. Role labels appear outside the connected
+tables: destination only for 1:N, both ends for 1:1. Pan, zoom, fit, calibrated 100% scale,
 clipboard duplication and undo/redo are supported. Adding a table smoothly pans the canvas to reveal it. Diagram layout and viewport
 are saved inside the document. Mac uses a resizable inspector; iPhone uses a
 separate details screen. The inspector supports **string, URL, date, time,

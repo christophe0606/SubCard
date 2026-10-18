@@ -8,6 +8,7 @@ enum EditorTests {
   static func main() async {
     await animatedReveal()
     newTableVisibility()
+    phoneTablePlacement()
     typedFields()
     customChecks()
     dataViews()
@@ -47,14 +48,34 @@ enum EditorTests {
     assert(arrow.sourceTable == first.id && arrow.destinationTable == second.id && arrow.many)
     assert(store.relationshipTitle(arrow) == "Clients → Orders")
     assert(store.selectedTable == nil && store.pendingSource == nil)
+    assert(arrow.referenceName == "Clients" && arrow.inverseName.isEmpty)
+    store.referenceNameDraft = "Customer"
+    store.inverseNameDraft = "Order"
+    assert(store.hasDraft)
+    store.commitNames()
+    assert(store.edge?.referenceName == "Customer" && store.edge?.inverseName == "Order")
+    assert(!store.hasDraft)
+    store.command("undo")
+    assert(store.referenceNameDraft == "Clients" && store.inverseNameDraft.isEmpty)
+    store.command("redo")
+    assert(store.referenceNameDraft == "Customer" && store.inverseNameDraft == "Order")
     assert(store.graph.tables.allSatisfy { $0.fields.isEmpty && $0.height == 64 })
     store.command("update_connection", ["id": arrow.id, "many": false, "cascade": false])
     assert(store.edge?.many == false)
+    assert(store.edge?.referenceName == "Customer" && store.edge?.inverseName == "Order")
     store.command("undo")
     assert(store.edge?.many == true)
     store.command("redo")
     assert(store.edge?.many == false)
     store.select(edge: arrow.id)  // Selecting an arrow never selects its hidden key or a table.
+    store.referenceNameDraft = "Buyer"
+    store.select(table: first.id)
+    assert(store.graph.edges.first?.referenceName == "Buyer" && !store.hasDraft)
+    store.select(edge: arrow.id)
+    store.referenceNameDraft = ""
+    store.commitNames()
+    assert(store.error != nil && store.referenceNameDraft == "Buyer" && !store.hasDraft)
+    store.error = nil
     store.deleteSelection()
     assert(store.graph.edges.isEmpty && store.graph.tables.count == 2)
     store.command("undo")
@@ -388,6 +409,41 @@ enum EditorTests {
     store.cancelReveal()
     store.document = nil
     print("Animated reveal continuity, interruption, save endpoints and undo passed.")
+  }
+  static func phoneTablePlacement() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.phoneTablePlacement = true
+    store.canvasSize = CGSize(width: 390, height: 700)
+    store.addTable()
+    let first = store.table!
+    store.addTable()
+    let second = store.table!
+    assert(second.x == first.x && second.y > first.y + first.height)
+    assert(store.graph.view.zoom == 1 && !store.showDetails)
+    store.command("undo")
+    assert(store.graph.tables.count == 1)
+    store.command("redo")
+    assert(store.graph.tables.last?.y == second.y)
+    // Reselecting an earlier table skips the occupied slot below it.
+    store.select(table: first.id)
+    store.addTable()
+    let third = store.table!
+    assert(third.x == first.x && third.y > second.y + second.height)
+    // Rotation affects the next insertion, without rearranging existing tables.
+    store.canvasSize = CGSize(width: 800, height: 330)
+    store.addTable()
+    let fourth = store.table!
+    assert(fourth.x > third.x + 320 && fourth.y == third.y)
+    assert(store.graph.tables.first?.x == first.x && store.graph.tables.first?.y == first.y)
+    store.select(table: nil)
+    store.addTable()
+    assert(store.table!.x > fourth.x + 320 && store.table!.y == fourth.y)
+    store.cancelReveal()
+    store.document = nil
+    print("Phone portrait/landscape placement, selection anchors, collision avoidance and undo passed.")
   }
   static func newTableVisibility() {
     let document = subcard_document_new()!

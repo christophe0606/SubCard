@@ -75,6 +75,7 @@ private struct ERInspector: View {
   private enum Editing: Hashable {
     case table
     case field(Int)
+    case reference, inverse
   }
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @FocusState private var editing: Editing?
@@ -443,6 +444,11 @@ private struct ERInspector: View {
   }
   private func connectionProperties(_ e: EREdge) -> some View {
     VStack(alignment: .leading, spacing: 12) {
+      nameInput("Reference name", text: $store.referenceNameDraft, focus: .reference)
+      Text("Field in \(store.tableName(e.destinationTable))").font(.caption).foregroundStyle(.secondary)
+      nameInput("Inverse name (optional)", text: $store.inverseNameDraft, focus: .inverse)
+      Text("Reverse role in \(store.tableName(e.sourceTable)); shown on 1:1 arrows.")
+        .font(.caption).foregroundStyle(.secondary)
       Picker(
         "Cardinality",
         selection: Binding(
@@ -936,12 +942,8 @@ private struct ERCanvasSurface: View {
     ]
   }
   private func labelPoint(_ points: [CGPoint]) -> CGPoint? {
-    guard
-      let (a, b) = zip(points, points.dropFirst()).max(by: {
-        hypot($0.0.x - $0.1.x, $0.0.y - $0.1.y) < hypot($1.0.x - $1.1.x, $1.0.y - $1.1.y)
-      })
-    else { return nil }
-    return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 12)
+    guard let midpoint = erRouteMidpoint(points) else { return nil }
+    return CGPoint(x: midpoint.x, y: midpoint.y - max(12, 12 / scale))
   }
   private func draw(_ ctx: inout GraphicsContext, size: CGSize) {
     let step = 32 * scale
@@ -956,7 +958,7 @@ private struct ERCanvasSurface: View {
         }
       }
     }
-    func line(_ points: [CGPoint], selected: Bool) {
+    func line(_ points: [CGPoint], selected: Bool, hasTargetPort: Bool = true) {
       guard let first = points.first else { return }
       var path = Path()
       path.move(to: screen(first))
@@ -964,13 +966,53 @@ private struct ERCanvasSurface: View {
       ctx.stroke(
         path, with: .color(selected ? .accentColor : .secondary), lineWidth: selected ? 3 : 1.6)
       if let last = points.last {
-        let q = screen(last)
+        let head = erArrowhead(last, hasPort: hasTargetPort).map(screen)
         var arrow = Path()
-        arrow.move(to: CGPoint(x: q.x - 8, y: q.y - 5))
-        arrow.addLine(to: q)
-        arrow.addLine(to: CGPoint(x: q.x - 8, y: q.y + 5))
-        ctx.stroke(arrow, with: .color(selected ? .accentColor : .secondary), lineWidth: 2)
+        arrow.move(to: head[0])
+        arrow.addLine(to: head[1])
+        arrow.addLine(to: head[2])
+        ctx.stroke(arrow, with: .color(selected ? .accentColor : .secondary), lineWidth: max(1, 2 * scale))
       }
+    }
+    var obstacles = tables.map { CGRect(x: $0.x, y: $0.y, width: width, height: $0.height) }
+    for e in store.graph.edges {
+      if let center = labelPoint(route(e)) {
+        let text = ctx.resolve(Text(e.many ? "1:N" : "1:1").font(.system(size: max(10, 13 * scale))))
+        let size = text.measure(in: CGSize(width: CGFloat.infinity, height: CGFloat.infinity))
+        obstacles.append(CGRect(x: center.x - size.width / scale / 2,
+          y: center.y - size.height / scale / 2, width: size.width / scale, height: size.height / scale))
+      }
+    }
+    store.relationshipLabelBounds = [:]
+    #if os(macOS)
+      let labelBackground = Color(nsColor: .windowBackgroundColor)
+    #else
+      let labelBackground = Color(uiColor: .systemBackground)
+    #endif
+    func endpointName(_ name: String, endpoint: CGPoint, source: Bool, edge: EREdge) {
+      guard !name.isEmpty else { return }
+      let fontSize = max(10, 13 * scale)
+      let maxWidth = 180 * max(0.6, scale)
+      let color: Color = edge.id == store.selectedEdge ? .accentColor : .primary
+      func resolved(_ text: String) -> GraphicsContext.ResolvedText {
+        ctx.resolve(Text(text).font(.system(size: fontSize)).foregroundColor(color))
+      }
+      var text = name
+      var rendered = resolved(text)
+      while rendered.measure(in: CGSize(width: CGFloat.infinity, height: CGFloat.infinity)).width > maxWidth && !text.isEmpty {
+        text.removeLast()
+        rendered = resolved(text + "…")
+      }
+      let measured = rendered.measure(in: CGSize(width: CGFloat.infinity, height: CGFloat.infinity))
+      let rect = erEndpointLabelRect(endpoint: endpoint, source: source,
+        size: CGSize(width: (measured.width + 10) / scale, height: (measured.height + 6) / scale),
+        obstacles: obstacles, gap: max(8, 5 / scale))
+      obstacles.append(rect)
+      store.relationshipLabelBounds[edge.id, default: []].append(rect)
+      let origin = screen(rect.origin)
+      let bounds = CGRect(origin: origin, size: CGSize(width: rect.width * scale, height: rect.height * scale))
+      ctx.fill(Path(roundedRect: bounds, cornerRadius: 3), with: .color(labelBackground.opacity(0.94)))
+      ctx.draw(rendered, at: CGPoint(x: origin.x + 5, y: origin.y + 3), anchor: .topLeading)
     }
     for e in store.graph.edges {
       let points = route(e)
@@ -979,6 +1021,12 @@ private struct ERCanvasSurface: View {
         ctx.draw(
           Text(e.many ? "1:N" : "1:1").font(.system(size: max(10, 13 * scale))).foregroundColor(
             e.id == store.selectedEdge ? .accentColor : .primary), at: screen(label))
+      }
+      if let destination = points.last {
+        endpointName(e.referenceName, endpoint: destination, source: false, edge: e)
+      }
+      if !e.many, let source = points.first {
+        endpointName(e.inverseName, endpoint: source, source: true, edge: e)
       }
     }
     for t in tables {
@@ -1005,7 +1053,7 @@ private struct ERCanvasSurface: View {
     if let source = store.pendingSource, let table = tables.first(where: { $0.id == source }),
       let linkPreview
     {
-      line([port(table, right: true), linkPreview], selected: true)
+      line([port(table, right: true), linkPreview], selected: true, hasTargetPort: false)
     }
   }
   private func circle(_ ctx: inout GraphicsContext, _ center: CGPoint, selected: Bool) {
@@ -1077,6 +1125,10 @@ private struct ERCanvasSurface: View {
     } else if tapped {
       var hit: Int?
       for e in store.graph.edges.reversed() {
+        if store.relationshipLabelBounds[e.id]?.contains(where: { $0.contains(p) }) == true {
+          hit = e.id
+          break
+        }
         let points = route(e)
         if let label = labelPoint(points) {
           let q = screen(label)
@@ -1141,9 +1193,10 @@ private struct ERCanvasSurface: View {
     }
   #endif
   private func fit(_ size: CGSize) {
-    guard let left = tables.map(\.x).min(), let top = tables.map(\.y).min(),
-      let right = tables.map({ $0.x + width }).max(),
-      let bottom = tables.map({ $0.y + $0.height }).max()
+    let objects = tables.map { CGRect(x: $0.x, y: $0.y, width: width, height: $0.height) }
+      + store.relationshipLabelBounds.values.flatMap { $0 }
+    guard let left = objects.map(\.minX).min(), let top = objects.map(\.minY).min(),
+      let right = objects.map(\.maxX).max(), let bottom = objects.map(\.maxY).max()
     else {
       store.view(ERViewport())
       return
@@ -1155,8 +1208,8 @@ private struct ERCanvasSurface: View {
         0.0001,
         min((size.width - 70) / (right - left + 80), (size.height - 110) / (bottom - top + 80))
           / v.calibration))
-    v.panX = max(0, left - 40)
-    v.panY = max(0, top - 40)
+    v.panX = left - 40
+    v.panY = top - 40
     store.view(v)
   }
 }

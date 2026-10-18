@@ -112,11 +112,19 @@ persist independently of history, so navigation cannot consume model undo.
 
 The editor now models A → B as “A has one/many B.” The shared C++ schema generator
 places the hidden reference in B, automatically indexes it, and adds uniqueness
-for 1:1. Both frontends keep the canvas limited to tables, arrows and cardinality. Graph version 2
+for 1:1. Both frontends show tables, arrows, cardinality and relationship role names. Graph version 2
 distinguishes these conceptual arrows from version-1 foreign-key edges; the
 loader preserves existing physical schemas and rows. See the
 [table relationship contract](features/entity-relationship-canvas.md#table-relationships-2026-10-18)
 for generation, compatibility, interaction and verification details.
+
+Version 7 adds a destination `referenceName` and optional source `inverseName`
+to each relationship. Stable SQL keys do not depend on these labels. Both
+connection inspectors edit the names; 1:N arrows show only the reference, while
+1:1 arrows show both nonempty roles. Frontends measure endpoint labels and place
+them outside table/view rectangles, with single-line truncation and collision
+clearance. Name-only edits preserve fake data without rebuilding SQL tables;
+schema locking still applies. Earlier metadata loads with empty role names.
 
 ### Typed fields (2026-10-18)
 

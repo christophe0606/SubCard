@@ -22,7 +22,11 @@ struct ERTable {
 };
 // field == 0: conceptual table -> target relationship; generated target.r<ID> references table.id.
 // field != 0: legacy foreign-key edge, retained without rewriting existing data.
-struct EREdge { int id, table, field, target, targetField; bool many = true, cascade = false; };
+struct EREdge {
+    int id, table, field, target, targetField;
+    bool many = true, cascade = false;
+    std::string referenceName = "", inverseName = "";
+};
 struct ERViewColumn { int field; std::string group = "none"; };
 struct ERDataView {
     int id; std::string name; int table = 0; double x = 0, y = 0;

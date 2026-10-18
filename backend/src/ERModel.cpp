@@ -187,7 +187,10 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
             checks = checks || !f.check.empty();
         }
     }
-    std::string s = std::string("{\"version\":") + (!g.views.empty() ? "6" : checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
+    const bool namedRelationships = std::any_of(g.edges.begin(), g.edges.end(), [](const auto &e) {
+        return !e.referenceName.empty() || !e.inverseName.empty();
+    });
+    std::string s = std::string("{\"version\":") + (namedRelationships ? "7" : !g.views.empty() ? "6" : checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -237,7 +240,7 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
         s += "{\"id\":" + num(e.id) + ",\"table\":" + num(e.table) + ",\"field\":" + num(e.field) +
              ",\"target\":" + num(e.target) + ",\"targetField\":" + num(e.targetField) +
              ",\"many\":" + (e.many ? "true" : "false") + ",\"cascade\":" + (e.cascade ? "true" : "false") +
-             "}";
+             ",\"referenceName\":" + quote(db, e.referenceName) + ",\"inverseName\":" + quote(db, e.inverseName) + "}";
     }
     s += "]";
     if (!g.views.empty()) {
@@ -292,14 +295,16 @@ ERTable table_from(const JSON &j) {
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") >= 1 && j.id("version") <= 6, "Unsupported ER model version.");
+    require(j.id("version") >= 1 && j.id("version") <= 7, "Unsupported ER model version.");
     ERGraph g;
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
     for (auto &e : j.array("edges")) {
         require(j.id("version") >= 2 || e.id("field") != 0, "Version-1 edges require a foreign-key field.");
         g.edges.push_back({e.id("id"), e.id("table"), e.id("field"), e.id("target"), e.id("targetField"),
-                           e.boolean("many"), e.boolean("cascade")});
+                           e.boolean("many"), e.boolean("cascade"),
+                           e.type("referenceName").empty() ? "" : e.str("referenceName"),
+                           e.type("inverseName").empty() ? "" : e.str("inverseName")});
     }
     if (!j.type("views").empty()) {
         require(j.id("version") >= 6, "Views require ER model version 6.");
@@ -392,6 +397,9 @@ int validate(ERGraph &g) {
     std::set<int> connected;
     for (auto &e : g.edges) {
         id(e.id);
+        // Empty names remain valid only for relationships from older documents.
+        if (!e.referenceName.empty()) name(e.referenceName);
+        if (!e.inverseName.empty()) name(e.inverseName);
         if (e.field == 0) {
             table(g, e.table);
             table(g, e.target);
@@ -781,7 +789,10 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
                       g.edges.end());
     } else if (op == "add_connection") {
         g.edges.push_back({next++, j.id("table"), 0, j.id("target"), 0,
-                           j.type("many").empty() ? true : j.boolean("many"), false});
+                           j.type("many").empty() ? true : j.boolean("many"), false,
+                           j.type("referenceName").empty() ? table(g, j.id("table")).name : j.str("referenceName"),
+                           j.type("inverseName").empty() ? "" : j.str("inverseName")});
+        name(g.edges.back().referenceName);
     } else if (op == "connect") {
         const int sourceTable = j.id("table"), sourceField = j.id("field");
         require(sourceField != 0, "Legacy connections require a foreign-key field.");
@@ -796,8 +807,16 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         }
     } else if (op == "update_connection") {
         auto &e = edge(g, j.id("id"));
-        e.many = j.boolean("many");
-        e.cascade = e.many && j.boolean("cascade");
+        const auto before = e;
+        if (!j.type("many").empty()) e.many = j.boolean("many");
+        if (!j.type("cascade").empty()) e.cascade = j.boolean("cascade");
+        e.cascade = e.many && e.cascade;
+        if (!j.type("referenceName").empty()) {
+            e.referenceName = j.str("referenceName");
+            name(e.referenceName);
+        }
+        if (!j.type("inverseName").empty()) e.inverseName = j.str("inverseName");
+        changesSchema = e.many != before.many || e.cascade != before.cascade;
     } else if (op == "delete_connection") {
         int id = j.id("id");
         edge(g, id);
@@ -811,7 +830,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
     if (json == graph_json(db, m.graph))
         return false;
     // Label edits are still schema edits, even though stable SQL IDs need no DDL.
-    bool labels = op == "update_index" || op == "update_field" ||
+    bool labels = op == "update_index" || op == "update_field" || op == "update_connection" ||
                   (op == "update_table" && table(g, j.id("id")).name != table(m.graph, j.id("id")).name);
     require(!state.schema_locked || (!changesSchema && !labels),
             "The user schema is locked because this document has held real data.");

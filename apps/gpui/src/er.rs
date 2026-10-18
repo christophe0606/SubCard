@@ -4,7 +4,7 @@ use gpui::{prelude::*, *};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -101,6 +101,10 @@ pub struct Edge {
     pub target: i32,
     pub many: bool,
     pub cascade: bool,
+    #[serde(default, rename = "referenceName")]
+    pub reference_name: String,
+    #[serde(default, rename = "inverseName")]
+    pub inverse_name: String,
 }
 impl Edge {
     fn source_table(&self) -> i32 {
@@ -258,6 +262,10 @@ pub struct ERState {
     pub selected_field: Option<i32>,
     field_name: Entity<TextInput>,
     field_baseline: String,
+    reference_name: Entity<TextInput>,
+    reference_baseline: String,
+    inverse_name: Entity<TextInput>,
+    inverse_baseline: String,
     field_menu: Option<bool>, // true: add; false: change datatype.
     dropdown: Option<ERMenu>,
     check_editor: Option<CheckTarget>,
@@ -270,6 +278,7 @@ pub struct ERState {
     preview: Option<(i32, f64, f64)>,
     link_preview: Option<(f64, f64)>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    name_bounds: Rc<RefCell<Vec<(i32, NameRect)>>>,
     sidebar: f32,
     resizing: bool,
 }
@@ -278,6 +287,11 @@ impl ERState {
         let name = cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Table name"));
         let field_name =
             cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Field name"));
+        let reference_name =
+            cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Reference name"));
+        let inverse_name = cx.new(|cx| {
+            TextInput::new(String::new(), cx).with_placeholder("Inverse name (optional)")
+        });
         let mut subscriptions = Vec::new();
         let check_name =
             cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Constraint name"));
@@ -291,7 +305,7 @@ impl ERState {
                 |s, _, _: &crate::text_input::Submitted, _, cx| s.er_apply_check(cx),
             ));
         }
-        for input in [&name, &field_name] {
+        for input in [&name, &field_name, &reference_name, &inverse_name] {
             subscriptions.push(cx.on_blur(&input.focus_handle(cx), window, |s, _, cx| {
                 s.er_commit_names(cx)
             }));
@@ -317,6 +331,10 @@ impl ERState {
             selected_field: None,
             field_name,
             field_baseline: String::new(),
+            reference_name,
+            reference_baseline: String::new(),
+            inverse_name,
+            inverse_baseline: String::new(),
             field_menu: None,
             dropdown: None,
             check_editor: None,
@@ -328,6 +346,7 @@ impl ERState {
             preview: None,
             link_preview: None,
             bounds: Rc::new(Cell::new(Bounds::default())),
+            name_bounds: Rc::new(RefCell::new(Vec::new())),
             sidebar: 285.,
             resizing: false,
         }
@@ -400,6 +419,13 @@ fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
 fn port(t: &Table, right: bool) -> (f64, f64) {
     (t.x + if right { 320. } else { 0. }, t.y + 30.)
 }
+fn arrowhead(destination: (f64, f64), has_port: bool) -> [(f64, f64); 3] {
+    let tip = (
+        destination.0 - if has_port { 7. } else { 0. },
+        destination.1,
+    );
+    [(tip.0 - 8., tip.1 - 5.), tip, (tip.0 - 8., tip.1 + 5.)]
+}
 fn route(g: &[Table], e: &Edge, edges: &[Edge]) -> Vec<(f64, f64)> {
     let Some(a) = g.iter().find(|t| t.id == e.source_table()) else {
         return vec![];
@@ -433,15 +459,71 @@ fn route(g: &[Table], e: &Edge, edges: &[Edge]) -> Vec<(f64, f64)> {
     }
 }
 fn label_position(points: &[(f64, f64)], scale: f64) -> Option<(f64, f64)> {
-    points
-        .windows(2)
-        .max_by(|a, b| distance(a[0], a[1]).total_cmp(&distance(b[0], b[1])))
-        .map(|s| {
-            (
-                (s[0].0 + s[1].0) / 2. - 10_f64.max(10. / scale),
-                (s[0].1 + s[1].1) / 2. - 24_f64.max(24. / scale),
-            )
-        })
+    if points.len() < 2 {
+        return None;
+    }
+    let mut remaining = points.windows(2).map(|s| distance(s[0], s[1])).sum::<f64>() / 2.;
+    for segment in points.windows(2) {
+        let (a, b) = (segment[0], segment[1]);
+        let length = distance(a, b);
+        if length > 0. && remaining <= length {
+            let fraction = remaining / length;
+            return Some((
+                a.0 + fraction * (b.0 - a.0),
+                a.1 + fraction * (b.1 - a.1) - 12_f64.max(12. / scale),
+            ));
+        }
+        remaining -= length;
+    }
+    points.first().map(|p| (p.0, p.1 - 12_f64.max(12. / scale)))
+}
+#[derive(Clone, Copy, Debug)]
+struct NameRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+impl NameRect {
+    fn intersects(self, other: Self, gap: f64) -> bool {
+        self.x < other.x + other.width + gap
+            && self.x + self.width > other.x - gap
+            && self.y < other.y + other.height + gap
+            && self.y + self.height > other.y - gap
+    }
+    fn contains(self, p: (f64, f64)) -> bool {
+        p.0 >= self.x && p.0 <= self.x + self.width && p.1 >= self.y && p.1 <= self.y + self.height
+    }
+}
+fn endpoint_label_rect(
+    endpoint: (f64, f64),
+    source: bool,
+    size: (f64, f64),
+    obstacles: &[NameRect],
+    gap: f64,
+) -> NameRect {
+    let mut rect = NameRect {
+        x: if source {
+            endpoint.0 + gap
+        } else {
+            endpoint.0 - gap - size.0
+        },
+        y: endpoint.1 - gap - size.1,
+        width: size.0,
+        height: size.1,
+    };
+    for _ in 0..=obstacles.len() {
+        let top = obstacles
+            .iter()
+            .filter(|o| rect.intersects(**o, gap))
+            .map(|o| o.y)
+            .min_by(f64::total_cmp);
+        let Some(top) = top else {
+            return rect;
+        };
+        rect.y = top - gap - rect.height - 0.01;
+    }
+    rect
 }
 fn segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -709,8 +791,30 @@ impl SubCardView {
     pub fn er_has_draft(&self, cx: &App) -> bool {
         self.er.name.read(cx).content.as_ref() != self.er.name_baseline
             || self.er.field_name.read(cx).content.as_ref() != self.er.field_baseline
+            || self.er.reference_name.read(cx).content.as_ref() != self.er.reference_baseline
+            || self.er.inverse_name.read(cx).content.as_ref() != self.er.inverse_baseline
     }
     fn er_load_names(&mut self, cx: &mut Context<Self>) {
+        let edge = self
+            .er
+            .graph
+            .edges
+            .iter()
+            .find(|e| Some(e.id) == self.er.edge);
+        let reference = edge.map(|e| e.reference_name.clone()).unwrap_or_default();
+        let inverse = edge.map(|e| e.inverse_name.clone()).unwrap_or_default();
+        self.er.reference_baseline = reference.clone();
+        self.er.inverse_baseline = inverse.clone();
+        if self.er.reference_name.read(cx).content.as_ref() != reference {
+            self.er
+                .reference_name
+                .update(cx, |i, cx| i.set_content(reference, cx));
+        }
+        if self.er.inverse_name.read(cx).content.as_ref() != inverse {
+            self.er
+                .inverse_name
+                .update(cx, |i, cx| i.set_content(inverse, cx));
+        }
         let field_name = self
             .er
             .graph
@@ -757,6 +861,19 @@ impl SubCardView {
     pub fn er_commit_names(&mut self, cx: &mut Context<Self>) {
         if !self.er_has_draft(cx) {
             return;
+        }
+        if let Some(id) = self.er.edge {
+            let reference = self.er.reference_name.read(cx).content.to_string();
+            let inverse = self.er.inverse_name.read(cx).content.to_string();
+            if reference != self.er.reference_baseline || inverse != self.er.inverse_baseline {
+                let mut value = json!({"op":"update_connection","id":id,"inverseName":inverse});
+                if reference != self.er.reference_baseline {
+                    value["referenceName"] = json!(reference);
+                }
+                if let Err(e) = self.document.er_command(value) {
+                    self.error = Some(e);
+                }
+            }
         }
         if let Some(v) = self
             .er
@@ -1069,12 +1186,18 @@ impl SubCardView {
                 r = r.max(table.x + 320.);
                 b = b.max(table.y + table.height());
             }
+            for (_, rect) in self.er.name_bounds.borrow().iter() {
+                l = l.min(rect.x);
+                t = t.min(rect.y);
+                r = r.max(rect.x + rect.width);
+                b = b.max(rect.y + rect.height);
+            }
             let bounds = self.er.bounds.get();
             v.zoom = ((f64::from(bounds.size.width) - 60.) / (r - l + 80.))
                 .min((f64::from(bounds.size.height) - 60.) / (b - t + 80.))
                 / v.calibration;
-            v.pan_x = (l - 40.).max(0.);
-            v.pan_y = (t - 40.).max(0.);
+            v.pan_x = l - 40.;
+            v.pan_y = t - 40.;
         }
         self.er_view(v, cx);
     }
@@ -1150,9 +1273,15 @@ impl SubCardView {
                     let scale = self.er.scale();
                     let width = (26. * scale).max(26.) / scale;
                     let height = (20. * scale).max(20.) / scale;
-                    p.0 >= q.0 && p.0 <= q.0 + width && p.1 >= q.1 && p.1 <= q.1 + height
+                    (p.0 - q.0).abs() <= width / 2. && (p.1 - q.1).abs() <= height / 2.
                 });
                 label_hit
+                    || self
+                        .er
+                        .name_bounds
+                        .borrow()
+                        .iter()
+                        .any(|(id, rect)| *id == e.id && rect.contains(p))
                     || points
                         .windows(2)
                         .any(|s| segment_distance(p, s[0], s[1]) < 10. / self.er.scale())
@@ -1266,7 +1395,9 @@ impl SubCardView {
         let selected_view = graph.views.iter().any(|v| Some(v.id) == selected);
         let selected_edge = self.er.edge;
         let text_focus = self.er.name.focus_handle(cx).is_focused(window)
-            || self.er.field_name.focus_handle(cx).is_focused(window);
+            || self.er.field_name.focus_handle(cx).is_focused(window)
+            || self.er.reference_name.focus_handle(cx).is_focused(window)
+            || self.er.inverse_name.focus_handle(cx).is_focused(window);
         let paste_available = cx
             .read_from_clipboard()
             .and_then(|c| c.text())
@@ -1276,6 +1407,7 @@ impl SubCardView {
         let link = self.er.link_preview;
         let bounds = self.er.bounds.clone();
         let bounds_paint = bounds.clone();
+        let name_bounds = self.er.name_bounds.clone();
         let toolbar = div()
             .flex()
             .flex_wrap()
@@ -1350,6 +1482,7 @@ impl SubCardView {
                             selected_edge,
                             pending,
                             link,
+                            &name_bounds,
                             b,
                             w,
                             cx,
@@ -1702,6 +1835,12 @@ impl SubCardView {
             let cascade = e.cascade;
             panel = panel.child(div().font_weight(FontWeight::BOLD).child("Relationship"))
                 .child(format!("From: {}", source.name)).child(format!("To: {}", target.name))
+                .child("Reference name")
+                .child(if schema { self.er.reference_name.clone().into_any_element() } else { div().child(e.reference_name.clone()).into_any_element() })
+                .child(div().text_size(px(12.)).child(format!("Field in {}", target.name)))
+                .child("Inverse name (optional)")
+                .child(if schema { self.er.inverse_name.clone().into_any_element() } else { div().child(e.inverse_name.clone()).into_any_element() })
+                .child(div().text_size(px(12.)).child(format!("Reverse role in {}; shown on 1:1 arrows.", source.name)))
                 .child("Cardinality")
                 .child(button(if many {"One to many (1:N)"} else {"One to one (1:1)"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":!many,"cascade":false}),cx)))
                 .when(many,|d|d.child(button(if cascade {"Delete source record: cascade"}else{"Delete source record: block"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":true,"cascade":!cascade}),cx))))
@@ -2073,6 +2212,7 @@ fn paint(
     selected_edge: Option<i32>,
     pending: Option<i32>,
     link: Option<(f64, f64)>,
+    name_bounds: &RefCell<Vec<(i32, NameRect)>>,
     bounds: Bounds<Pixels>,
     w: &mut Window,
     cx: &mut App,
@@ -2104,30 +2244,69 @@ fn paint(
                 x += step;
             }
         }
-        let draw_line = |points: &[(f64, f64)], selected: bool, w: &mut Window| {
-            if points.len() < 2 {
-                return;
+        let draw_line =
+            |points: &[(f64, f64)], selected: bool, has_target_port: bool, w: &mut Window| {
+                if points.len() < 2 {
+                    return;
+                }
+                let mut p = PathBuilder::stroke(px(if selected { 3. } else { 1.6 }));
+                p.move_to(screen(points[0]));
+                for q in &points[1..] {
+                    p.line_to(screen(*q));
+                }
+                if let Some(q) = points.last() {
+                    let head = arrowhead(*q, has_target_port).map(screen);
+                    p.move_to(head[0]);
+                    p.line_to(head[1]);
+                    p.line_to(head[2]);
+                }
+                if let Ok(path) = p.build() {
+                    w.paint_path(path, rgb(if selected { 0x0066dd } else { 0x64748b }));
+                }
+            };
+        let mut obstacles: Vec<_> = tables
+            .iter()
+            .map(|t| NameRect {
+                x: t.x,
+                y: t.y,
+                width: 320.,
+                height: t.height(),
+            })
+            .collect();
+        let mut cardinality_bounds = Vec::new();
+        for e in &g.edges {
+            if let Some(p) = label_position(&route(tables, e, &g.edges), s) {
+                let font_size = (13. * s).max(10.) as f32;
+                let text = if e.many { "1:N" } else { "1:1" };
+                let run = TextRun {
+                    len: text.len(),
+                    font: w.text_style().font(),
+                    color: black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = w
+                    .text_system()
+                    .shape_line(text.into(), px(font_size), &[run], None);
+                let width = f64::from(line.width) / s;
+                let height = f64::from(font_size) * 1.2 / s;
+                let rect = NameRect {
+                    x: p.0 - width / 2.,
+                    y: p.1 - height / 2.,
+                    width,
+                    height,
+                };
+                obstacles.push(rect);
+                cardinality_bounds.push((e.id, rect));
             }
-            let mut p = PathBuilder::stroke(px(if selected { 3. } else { 1.6 }));
-            p.move_to(screen(points[0]));
-            for q in &points[1..] {
-                p.line_to(screen(*q));
-            }
-            if let Some(q) = points.last() {
-                let q = screen(*q);
-                p.move_to(q + point(px(-8.), px(-5.)));
-                p.line_to(q);
-                p.line_to(q + point(px(-8.), px(5.)));
-            }
-            if let Ok(path) = p.build() {
-                w.paint_path(path, rgb(if selected { 0x0066dd } else { 0x64748b }));
-            }
-        };
+        }
+        name_bounds.borrow_mut().clear();
         for e in &g.edges {
             let points = route(tables, e, &g.edges);
-            draw_line(&points, Some(e.id) == selected_edge, w);
-            if let Some(position) = label_position(&points, s) {
-                let p = screen(position);
+            draw_line(&points, Some(e.id) == selected_edge, true, w);
+            if let Some((_, rect)) = cardinality_bounds.iter().find(|(id, _)| *id == e.id) {
+                let p = screen((rect.x, rect.y));
                 label(
                     if e.many { "1:N" } else { "1:1" },
                     p,
@@ -2136,6 +2315,68 @@ fn paint(
                     w,
                     cx,
                 );
+            }
+            for (text, source, endpoint) in [
+                (e.reference_name.as_str(), false, points.last()),
+                (
+                    if e.many { "" } else { e.inverse_name.as_str() },
+                    true,
+                    points.first(),
+                ),
+            ] {
+                let Some(endpoint) = endpoint else {
+                    continue;
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                let font_size = (13. * s).max(10.) as f32;
+                let run = TextRun {
+                    len: 0,
+                    font: w.text_style().font(),
+                    color: if Some(e.id) == selected_edge {
+                        rgb(0x0066dd).into()
+                    } else {
+                        black()
+                    },
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shape = |text: &str| {
+                    let mut run = run.clone();
+                    run.len = text.len();
+                    w.text_system()
+                        .shape_line(text.to_owned().into(), px(font_size), &[run], None)
+                };
+                let mut text = text.to_owned();
+                let mut line = shape(&text);
+                while f64::from(line.width) > 180. * s.max(0.6) && !text.is_empty() {
+                    text.pop();
+                    line = shape(&format!("{text}…"));
+                }
+                let rect = endpoint_label_rect(
+                    *endpoint,
+                    source,
+                    (
+                        (f64::from(line.width) + 10.) / s,
+                        (f64::from(font_size) * 1.2 + 6.) / s,
+                    ),
+                    &obstacles,
+                    8_f64.max(5. / s),
+                );
+                obstacles.push(rect);
+                name_bounds.borrow_mut().push((e.id, rect));
+                let p = screen((rect.x, rect.y));
+                w.paint_quad(fill(
+                    Bounds::new(
+                        p,
+                        size(px((rect.width * s) as f32), px((rect.height * s) as f32)),
+                    ),
+                    white(),
+                ));
+                line.paint(p + point(px(5.), px(3.)), px(font_size * 1.2), w, cx)
+                    .ok();
             }
         }
         for t in tables {
@@ -2191,7 +2432,7 @@ fn paint(
         }
         if let Some(tid) = pending {
             if let (Some(t), Some(p)) = (tables.iter().find(|t| t.id == tid), link) {
-                draw_line(&[port(t, true), p], true, w);
+                draw_line(&[port(t, true), p], true, false, w);
             }
         }
         if tables.is_empty() {
@@ -2379,6 +2620,8 @@ mod viewport_tests {
             target: 2,
             many: true,
             cascade: false,
+            reference_name: "Reference".into(),
+            inverse_name: "Inverse".into(),
         };
         let legacy = Edge {
             id: 4,
@@ -2387,6 +2630,8 @@ mod viewport_tests {
             target: 1,
             many: false,
             cascade: false,
+            reference_name: "Reference".into(),
+            inverse_name: "Inverse".into(),
         };
         assert_eq!((edge.source_table(), edge.destination_table()), (1, 2));
         assert_eq!((legacy.source_table(), legacy.destination_table()), (1, 2));
@@ -2405,10 +2650,82 @@ mod viewport_tests {
             target: 1,
             many: true,
             cascade: false,
+            reference_name: "Reference".into(),
+            inverse_name: "Inverse".into(),
         };
         let self_route = route(&tables, &self_edge, std::slice::from_ref(&self_edge));
         assert_eq!(self_route.len(), 6);
         assert!(self_route.iter().any(|p| p.1 > 164.));
+    }
+    #[::core::prelude::v1::test]
+    fn relationship_names_and_endpoint_clearance() {
+        use super::{Edge, NameRect, endpoint_label_rect};
+        use serde_json::json;
+        let head = super::arrowhead((100., 30.), true);
+        assert_eq!(head, [(85., 25.), (93., 30.), (85., 35.)]);
+        assert_eq!(super::arrowhead((100., 30.), false)[1], (100., 30.));
+        assert_eq!(
+            super::label_position(&[(0., 0.), (100., 0.), (100., 0.), (200., 0.)], 1.),
+            Some((100., -12.))
+        );
+        assert_eq!(
+            super::label_position(&[(0., 0.), (20., 0.), (20., 100.)], 1.),
+            Some((20., 28.))
+        );
+        assert_eq!(super::label_position(&[], 1.), None);
+        let old: Edge = serde_json::from_value(serde_json::json!({
+            "id":3,"table":1,"field":0,"target":2,"many":true,"cascade":false
+        }))
+        .unwrap();
+        assert!(old.reference_name.is_empty() && old.inverse_name.is_empty());
+        let mut doc = crate::document::Document::new().unwrap();
+        for cmd in [
+            json!({"op":"add_table","name":"Colors","x":10,"y":100}),
+            json!({"op":"add_table","name":"Products","x":355,"y":100}),
+            json!({"op":"add_connection","table":1,"target":2,"referenceName":"Color","inverseName":"Products"}),
+            json!({"op":"update_connection","id":3,"many":false}),
+        ] {
+            doc.er_command(cmd).unwrap();
+        }
+        let g: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert_eq!(g.edges[0].reference_name, "Color");
+        assert_eq!(g.edges[0].inverse_name, "Products");
+        assert!(!g.edges[0].many);
+        for scale in [0.01, 0.25, 1., 4., 16.] {
+            let mut obstacles = vec![
+                NameRect {
+                    x: 10.,
+                    y: 100.,
+                    width: 320.,
+                    height: 64.,
+                },
+                NameRect {
+                    x: 355.,
+                    y: 100.,
+                    width: 320.,
+                    height: 64.,
+                },
+                NameRect {
+                    x: 0.,
+                    y: 20.,
+                    width: 320.,
+                    height: 64.,
+                },
+            ];
+            for endpoint in [(355., 130.), (10., 130.), (330., 130.)] {
+                for source in [false, true] {
+                    let rect = endpoint_label_rect(
+                        endpoint,
+                        source,
+                        (190. / scale, 25. / scale),
+                        &obstacles,
+                        8_f64.max(5. / scale),
+                    );
+                    assert!(obstacles.iter().all(|o| !rect.intersects(*o, 0.)));
+                    obstacles.push(rect);
+                }
+            }
+        }
     }
     #[::core::prelude::v1::test]
     fn typed_field_options_round_trip_without_changing_canvas_geometry() {
