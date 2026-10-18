@@ -1,0 +1,78 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 60;
+    objects = {
+        /* Build files */
+        B00000000000000000000001 = {isa = PBXBuildFile; fileRef = F00000000000000000000001; };
+        B00000000000000000000002 = {isa = PBXBuildFile; fileRef = F00000000000000000000002; };
+        B00000000000000000000003 = {isa = PBXBuildFile; productRef = D00000000000000000000001; };
+        B00000000000000000000004 = {isa = PBXBuildFile; fileRef = F00000000000000000000004; };
+        B00000000000000000000005 = {isa = PBXBuildFile; fileRef = F00000000000000000000005; };
+        B00000000000000000000006 = {isa = PBXBuildFile; fileRef = F00000000000000000000006; };
+        B00000000000000000000008 = {isa = PBXBuildFile; fileRef = F00000000000000000000008; };
+        /* Sources and resources are kept in the existing shared tree. */
+        F00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../swiftui/SubCardApp.swift; sourceTree = "<group>"; };
+        F00000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../swiftui/iOSDocument.swift; sourceTree = "<group>"; };
+        F00000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SubCard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        F00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text; path = ../../LICENSE; sourceTree = "<group>"; };
+        F00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ../../THIRD_PARTY_NOTICES.md; sourceTree = "<group>"; };
+        F00000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = folder; path = ../../licenses; sourceTree = "<group>"; };
+        F00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        F00000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+        900000000000000000000001 = {isa = PBXGroup; children = (F00000000000000000000001, F00000000000000000000002, F00000000000000000000007, F00000000000000000000008, F00000000000000000000004, F00000000000000000000005, F00000000000000000000006, 900000000000000000000002); sourceTree = "<group>"; };
+        900000000000000000000002 = {isa = PBXGroup; children = (F00000000000000000000003); name = Products; sourceTree = "<group>"; };
+        800000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001, B00000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+        800000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
+        800000000000000000000003 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000004, B00000000000000000000005, B00000000000000000000006, B00000000000000000000008); runOnlyForDeploymentPostprocessing = 0; };
+        A00000000000000000000001 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = C00000000000000000000002;
+            buildPhases = (800000000000000000000001, 800000000000000000000002, 800000000000000000000003);
+            buildRules = (); dependencies = ();
+            name = SubCard;
+            packageProductDependencies = (D00000000000000000000001);
+            productName = SubCard;
+            productReference = F00000000000000000000003;
+            productType = "com.apple.product-type.application";
+        };
+        A00000000000000000000002 = {
+            isa = PBXProject;
+            attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2710; TargetAttributes = {A00000000000000000000001 = {CreatedOnToolsVersion = 27.1; ProvisioningStyle = Automatic; }; }; };
+            buildConfigurationList = C00000000000000000000001;
+            compatibilityVersion = "Xcode 15.0";
+            developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base);
+            mainGroup = 900000000000000000000001;
+            packageReferences = (D00000000000000000000002);
+            productRefGroup = 900000000000000000000002;
+            projectDirPath = ""; projectRoot = "";
+            targets = (A00000000000000000000001);
+        };
+        D00000000000000000000001 = {isa = XCSwiftPackageProductDependency; package = D00000000000000000000002; productName = SubCardCore; };
+        D00000000000000000000002 = {isa = XCLocalSwiftPackageReference; relativePath = ../..; };
+        C00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000001, E00000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        C00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000003, E00000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        E00000000000000000000001 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; DEBUG_INFORMATION_FORMAT = dwarf; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; }; };
+        E00000000000000000000002 = {isa = XCBuildConfiguration; name = Release; buildSettings = {CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-O"; }; };
+        E00000000000000000000003 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {
+            PRODUCT_BUNDLE_IDENTIFIER = org.subcard.iphone; PRODUCT_NAME = SubCard;
+            ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+            INFOPLIST_FILE = Info.plist; GENERATE_INFOPLIST_FILE = NO;
+            TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphoneos;
+            SUPPORTS_MACCATALYST = NO; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+            ENABLE_DEBUG_DYLIB = NO; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0;
+            LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+        }; };
+        E00000000000000000000004 = {isa = XCBuildConfiguration; name = Release; buildSettings = {
+            PRODUCT_BUNDLE_IDENTIFIER = org.subcard.iphone; PRODUCT_NAME = SubCard;
+            ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+            INFOPLIST_FILE = Info.plist; GENERATE_INFOPLIST_FILE = NO;
+            TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphoneos;
+            SUPPORTS_MACCATALYST = NO; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+            ENABLE_DEBUG_DYLIB = NO; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0;
+            LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+        }; };
+    };
+    rootObject = A00000000000000000000002;
+}

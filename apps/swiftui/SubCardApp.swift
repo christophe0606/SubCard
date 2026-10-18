@@ -207,6 +207,7 @@ private struct DocumentCommands: Commands {
 struct SubCardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var store = AppDelegate.document
+    @FocusState private var editorIsFocused: Bool
     var body: some Scene {
         Window("SubCard", id: "document") {
             VStack(alignment: .leading, spacing: 16) {
@@ -214,8 +215,21 @@ struct SubCardApp: App {
                 Text(store.changed ? "Edited" : "No unsaved changes").foregroundStyle(.secondary)
                 Text("Document text")
                 TextField("Document text", text: Binding(get: { store.text }, set: { store.setText($0) }))
-                    .textFieldStyle(.roundedBorder)
+                    // The native rounded style fixes the control height at a
+                    // size that clips this larger font. Let the plain field
+                    // size to its text and draw the border around its padding.
+                    .textFieldStyle(.plain)
                     .font(.system(size: 24))
+                    .focused($editorIsFocused)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(minHeight: 48)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(editorIsFocused ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
                 Spacer()
             }
             .padding(32)
@@ -228,12 +242,10 @@ struct SubCardApp: App {
     }
 }
 #else
-// The C++ core remains reusable on iOS. Desktop file commands use AppKit above;
-// an iOS document-browser scene will be supplied separately.
 @main
 struct SubCardApp: App {
     var body: some Scene {
-        WindowGroup("SubCard") { Text(String(cString: subcard_greeting())) }
+        WindowGroup("SubCard") { PhoneDocumentView() }
     }
 }
 #endif

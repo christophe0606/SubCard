@@ -2,4 +2,16 @@
 .swiftpm/
 target/
 .DS_Store
+xcuserdata/
+*.xcuserstate
+.env
+.env.*
+*.p8
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.mobileprovision
+*.provisionprofile
 

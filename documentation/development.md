@@ -38,6 +38,8 @@ From the checkout root:
 ./scripts/run.sh swiftui
 ./scripts/run.sh gpui
 ./scripts/test.sh
+./scripts/build-iphone.sh
+./scripts/run.sh iphone --device IPHONE_UDID
 ```
 
 `run.sh` builds the requested variant before launching it. On macOS, bundles are
@@ -82,3 +84,20 @@ report narrowing conversions in the unmodified upstream amalgamation.
 and runs it under `.build/tests/`. When app bundles exist on macOS, it also checks
 their runtime library paths against the OS directories. Manual menu/panel and
 cross-frontend checks are recorded in [SQLite documents](features/documents.md).
+
+The [iPhone target](features/iphone.md) builds with `./scripts/build-iphone.sh`
+(or `./scripts/build.sh iphone`). Its minimum deployment target is iOS 16.0.
+It uses the installed device SDK and produces
+an unsigned `.build/apps/iphone/SubCard.app` without a simulator download or
+connected phone. The build verifies arm64/iPhoneOS metadata and system-only
+runtime dependencies. `scripts/test.sh` also verifies that bundle when present.
+For development signing, export `SUBCARD_TEAM_ID`, `SUBCARD_BUNDLE_ID`, and
+`SUBCARD_SIGNING_IDENTITY`, then run `./scripts/sign-iphone.sh` (optionally with
+`--device IPHONE_UDID`). To rebuild, sign, install, and launch on that phone, run
+`./scripts/run.sh iphone --device IPHONE_UDID`. This uses Apple's command-line
+tools without opening Xcode, with the same external build/cache paths. See the
+iPhone guide for device prerequisites and verification status.
+
+The Mac bundles and iPhone target use the checked-in [application icons](features/icons.md).
+After changing a PNG master, regenerate the native delivery formats with
+`./scripts/prepare-icons.sh`; intermediate icon sets stay in `.build/icons/`.

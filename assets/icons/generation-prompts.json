@@ -1,0 +1,22 @@
+{
+  "tool": "built-in image_gen.imagegen",
+  "date": "2026-10-18",
+  "iphone": {
+    "output": "sources/iphone.png",
+    "prompt": "Use case: logo-brand. Asset type: production app icon for SubCard on iPhone. Create a single finished square app icon, 1024 x 1024, full-bleed OPAQUE background with square corners (iOS will apply its own corner mask). Subject: a beautifully simple open book whose pages become a small spreadsheet / card grid. One clear unified emblem, not two unrelated objects. A strong open-book silhouette with a central spine and 3 by 3 broad cells on the right page; subtly layered pages on the left. Elegant contemporary native productivity app design, softly dimensional material, crisp geometry, restrained light and shadow. A memorable original symbol readable at 32 pixels. Let a tasteful deep blue / teal palette arise naturally from the book-and-data concept, with pale pages and one small warm accent cell. Centered composition, emblem occupies about 70 percent of canvas, comfortable safe area. No letters, words, numbers, badges, Apple logo, watermark, surrounding device, presentation sheet, inset tile, or decorative objects. Deliver only the actual icon artwork filling the square.",
+    "transparent_background": false
+  },
+  "mac_swiftui": {
+    "output": "sources/mac-swiftui.png",
+    "reference": "sources/iphone.png",
+    "prompt": "Use case: precise-object-edit. Convert the provided SubCard iPhone artwork into a polished macOS SwiftUI app icon. Preserve the book-with-right-page-spreadsheet emblem and its exact cool blue/teal/pale-page visual identity and ONE orange cell. Enclose this entire emblem on a deep blue to teal rounded-square icon tile with a smooth continuous contour, NOT a free-floating cutout of the book. The tile should occupy 80 percent of the square canvas width, centered, leaving a generous transparent margin on every side. The book must be comfortably inset INSIDE the tile, with no pages crossing the tile boundary. Use native macOS icon proportions and softly dimensional lighting. Crucial: absolutely clean transparent alpha outside the tile, no stray pixels, flecks, ragged cutout, halos, floating fragments or external objects. The entire background INSIDE the tile is opaque. Output a single square 1024x1024 icon, no text or badges. Match the reference artwork faithfully, merely adapt it to this macOS tile format.",
+    "transparent_background": true
+  },
+  "mac_gpui": {
+    "output": "sources/mac-gpui.png",
+    "reference": "sources/mac-swiftui.png",
+    "prompt": "Use case: precise-object-edit. Create the SubCard macOS GPUI sibling of this macOS SwiftUI icon. Change ONLY the plain left open-book page by adding a gently perspective-curved 3x3 spreadsheet grid with broad pale blue/cyan cells, matching the existing right-page grid. Keep the single orange accent cell on the RIGHT page only. Preserve the entire existing rounded-square blue/teal background tile, its dimensions, position, corner shape, lighting, book silhouette, margins and actual transparent surround. This is a sibling of the SAME app brand, not a redesign. Clean smooth alpha outside the tile, no speckles or stray pixels. No text, numbers, badges or extra elements. Square final app icon.",
+    "transparent_background": true
+  },
+  "export": "Selected generated PNGs were resampled to 1024 pixels using macOS sips. Native icon formats are exported by scripts/prepare-icons.sh."
+}

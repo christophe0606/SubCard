@@ -20,6 +20,12 @@ opaque owned handles, borrowed UTF-8 strings, and explicit operation results. Th
 C++ core catches errors before they cross the language boundary. Rust wraps each
 handle in an owner with `Drop`; Swift keeps its owner within the main actor.
 
+The iPhone target reuses the root Swift package's `SubCardCore` product. Immutable
+full-database snapshots allow platform-managed Files writes without clearing the
+shared dirty state until a write succeeds. The snapshot stores the source
+document identity and saved text baseline; later edits remain unsaved. See the
+[iPhone application](features/iphone.md) for the ownership and save sequence.
+
 ## SQLite document layer (2026-10-17)
 
 `backend/src/Document.cpp` owns the document schema, text mutations, format
@@ -56,8 +62,10 @@ build/packaging helpers rather than the current Bash scripts.
 
 Both desktop frontends are verified on macOS. Linux and Windows are not tested.
 The SwiftUI desktop scene uses a single `Window` and native AppKit document
-panels; iOS retains the bootstrap greeting scene. The shared core is portable,
-but an iOS document browser, signing, and simulator/device testing are not added.
+panels. The iPhone scene uses navigation/toolbar controls and native Files pickers.
+The iPhone application target has been built unsigned for arm64 iOS devices;
+signing, installation, and device runtime checks remain separate steps. No iPhone
+simulator runtime is needed for that build.
 
 SQLite documents and text editing are implemented. Card layout and scripting
 remain future work. The [hello-world feature](features/hello-world.md) records

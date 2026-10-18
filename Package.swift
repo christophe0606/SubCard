@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "SubCard",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS(.v16)],
     products: [
         .library(name: "SubCardCore", targets: ["SubCardCore"]),
         .executable(name: "SubCard", targets: ["SubCard"]),

@@ -8,6 +8,8 @@ bundle_macos() {
     local bundle="$SUBCARD_BUILD/apps/$variant/SubCard.app"
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
     cp "$executable" "$bundle/Contents/MacOS/SubCard"
+    cp "$SUBCARD_ROOT/assets/icons/mac-$variant.icns" \
+        "$bundle/Contents/Resources/SubCard.icns"
     cp "$SUBCARD_ROOT/LICENSE" "$SUBCARD_ROOT/THIRD_PARTY_NOTICES.md" \
         "$bundle/Contents/Resources/"
     cp -R "$SUBCARD_ROOT/licenses" "$bundle/Contents/Resources/"
@@ -17,6 +19,7 @@ bundle_macos() {
 <plist version="1.0"><dict>
     <key>CFBundleExecutable</key><string>SubCard</string>
     <key>CFBundleName</key><string>SubCard</string>
+    <key>CFBundleIconFile</key><string>SubCard.icns</string>
     <key>CFBundleDisplayName</key><string>SubCard</string>
     <key>CFBundleIdentifier</key><string>org.subcard.$variant</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -36,6 +39,9 @@ bundle_macos() {
 </dict></plist>
 PLIST
     codesign --force --sign - "$bundle"
+    # Updating files inside Contents does not update the enclosing .app's date.
+    # Let Launch Services notice changed metadata/resources on the next launch.
+    touch "$bundle"
     echo "Built $bundle"
 }
 
@@ -70,6 +76,7 @@ build_gpui() {
 case "${1:-all}" in
     swiftui) build_swiftui ;;
     gpui) build_gpui ;;
+    iphone) "$SUBCARD_ROOT/scripts/build-iphone.sh" ;;
     all) build_swiftui; build_gpui ;;
-    *) echo "Usage: $0 [swiftui|gpui|all]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [swiftui|gpui|iphone|all] (all builds both desktop versions)" >&2; exit 2 ;;
 esac

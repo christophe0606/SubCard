@@ -61,6 +61,14 @@ confirmation, and SwiftUI File commands. Its native text field supplies the usua
 Edit behavior. The shared C++ handle is owned by an object confined to the main
 actor, with one release per handle.
 
+On macOS, the 24-point SwiftUI editor uses the plain native text field with
+vertical padding, a 48-point minimum outer height, and a rounded border that
+indicates keyboard focus. The native rounded-border style fixed the control
+height too tightly for that font and clipped the bottom of the text. The padded
+field was rebuilt and visually checked with `Agypqj — Éléphant` so both descenders
+and accents fit. Restoring the original text also returned the document to its
+clean state. This layout change is confined to the macOS frontend.
+
 GPUI uses native macOS File/Edit/Window menus and platform file panels. Save action
 handlers exist only while changed, so GPUI's native menu validation dims Save and
 Save As. Its single-line input is adapted from the Apache-licensed upstream GPUI
@@ -98,7 +106,8 @@ All direct dynamic dependencies of the checked macOS executables resolve to
 `/usr/lib` or `/System/Library`; there is no SQLite dylib, Homebrew library path,
 or external SDK runtime dependency. OS frameworks may use their own system
 libraries internally. Linux and Windows runtime dependencies are not yet
-verified, and iOS still has its bootstrap scene rather than a document browser.
+verified. The [iPhone app](iphone.md) adds Files-based document controls and has
+been built for physical devices; on-device runtime checks remain pending.
 
 The working copy is in memory, so forced termination/power loss does not recover
 unsaved edits. Saves are currently synchronous and suitable for this small

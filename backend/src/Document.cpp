@@ -5,10 +5,14 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <atomic>
+#include <cstdint>
+#include <vector>
 
 namespace {
 thread_local std::string last_error;
 constexpr int application_id = 0x53424344; // SBCD
+std::atomic<std::uint64_t> next_document_id{1};
 struct Database {
     sqlite3* handle = nullptr;
     ~Database() { if (handle) sqlite3_close(handle); }
@@ -110,10 +114,17 @@ Result protect(Result failure, Function function) noexcept {
 }
 
 struct SubCardDocument {
+    const std::uint64_t id = next_document_id.fetch_add(1);
     Database database;
     std::string text;
     std::string saved_text;
     std::string path;
+};
+
+struct SubCardSnapshot {
+    std::uint64_t document_id;
+    std::string text;
+    std::vector<unsigned char> bytes;
 };
 
 SubCardDocument* subcard_document_new(void) {
@@ -182,3 +193,36 @@ int subcard_document_save(SubCardDocument* doc, const char* path) {
 }
 const char* subcard_last_error(void) { return last_error.c_str(); }
 const char* subcard_sqlite_version(void) { return sqlite3_libversion(); }
+
+SubCardSnapshot* subcard_document_snapshot(const SubCardDocument* doc) {
+    return protect<SubCardSnapshot*>(nullptr, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        auto snapshot = std::make_unique<SubCardSnapshot>();
+        snapshot->document_id = doc->id;
+        snapshot->text = doc->text;
+        sqlite3_int64 size = 0;
+        std::unique_ptr<unsigned char, decltype(&sqlite3_free)> bytes(
+            sqlite3_serialize(doc->database.handle, "main", &size, 0), sqlite3_free);
+        if (!bytes || size <= 0) throw std::runtime_error("Cannot create a document snapshot.");
+        snapshot->bytes.assign(bytes.get(), bytes.get() + size);
+        return snapshot.release();
+    });
+}
+const void* subcard_snapshot_bytes(const SubCardSnapshot* snapshot) {
+    return snapshot ? snapshot->bytes.data() : nullptr;
+}
+size_t subcard_snapshot_size(const SubCardSnapshot* snapshot) {
+    return snapshot ? snapshot->bytes.size() : 0;
+}
+void subcard_snapshot_close(SubCardSnapshot* snapshot) { delete snapshot; }
+int subcard_document_accept_snapshot(SubCardDocument* doc, const SubCardSnapshot* snapshot, const char* path) {
+    return protect(0, [=] {
+        if (!doc || !snapshot || snapshot->document_id != doc->id)
+            throw std::runtime_error("The saved snapshot belongs to another document.");
+        auto destination = absolute_path(path);
+        auto baseline = snapshot->text;
+        doc->path.swap(destination);
+        doc->saved_text.swap(baseline);
+        return 1;
+    });
+}

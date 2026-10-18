@@ -28,3 +28,6 @@ if [[ "$(uname -s)" == Darwin ]]; then
         fi
     done
 fi
+if [[ "$(uname -s)" == Darwin && -d "$SUBCARD_BUILD/apps/iphone/SubCard.app" ]]; then
+    "$SUBCARD_ROOT/scripts/verify-iphone.sh"
+fi

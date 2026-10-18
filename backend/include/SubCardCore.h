@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #ifndef SUBCARD_CORE_H
 #define SUBCARD_CORE_H
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,18 @@ int subcard_document_set_text(SubCardDocument* document, const char* text);
 // NULL path means save to the current path. A new document needs a path.
 // Save (including Save As) is a no-op while unchanged. Failure preserves edits.
 int subcard_document_save(SubCardDocument* document, const char* path);
+
+// Immutable, owned full-database snapshot for platform-managed file writers.
+// Taking/canceling a snapshot does not change the document's path or dirty state.
+typedef struct SubCardSnapshot SubCardSnapshot;
+SubCardSnapshot* subcard_document_snapshot(const SubCardDocument* document);
+const void* subcard_snapshot_bytes(const SubCardSnapshot* snapshot);
+size_t subcard_snapshot_size(const SubCardSnapshot* snapshot);
+void subcard_snapshot_close(SubCardSnapshot* snapshot);
+// Call only AFTER the platform successfully writes this snapshot. Edits made
+// since the snapshot remain changed. A snapshot belongs to its original document.
+int subcard_document_accept_snapshot(SubCardDocument* document,
+    const SubCardSnapshot* snapshot, const char* path);
 const char* subcard_last_error(void);
 const char* subcard_sqlite_version(void);
 
