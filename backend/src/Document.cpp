@@ -2,6 +2,8 @@
 #include "SubCardCore.h"
 #include "sqlite3.h"
 #include "UserData.h"
+#include "ERModel.h"
+#include "UTF8.h"
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -33,28 +35,7 @@ void open(Database& db, const char* path, int flags) {
     sqlite3_db_config(db.handle, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
     check(sqlite3_exec(db.handle, "PRAGMA foreign_keys=ON", nullptr, nullptr, nullptr), db.handle);
 }
-bool valid_utf8(const std::string& text) {
-    size_t i = 0;
-    while (i < text.size()) {
-        const auto first = static_cast<unsigned char>(text[i++]);
-        if (first < 0x80) continue;
-        unsigned value;
-        int count;
-        unsigned minimum;
-        if (first >= 0xc2 && first <= 0xdf) { value = first & 0x1f; count = 1; minimum = 0x80; }
-        else if (first >= 0xe0 && first <= 0xef) { value = first & 0x0f; count = 2; minimum = 0x800; }
-        else if (first >= 0xf0 && first <= 0xf4) { value = first & 0x07; count = 3; minimum = 0x10000; }
-        else return false;
-        while (count--) {
-            if (i == text.size()) return false;
-            const auto next = static_cast<unsigned char>(text[i++]);
-            if ((next & 0xc0) != 0x80) return false;
-            value = (value << 6) | (next & 0x3f);
-        }
-        if (value < minimum || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) return false;
-    }
-    return true;
-}
+
 void exec(sqlite3* db, const char* sql) {
     check(sqlite3_exec(db, sql, nullptr, nullptr, nullptr), db);
 }
@@ -78,7 +59,7 @@ std::string read_text(sqlite3* db) {
         throw std::runtime_error("The document content is missing or invalid.");
     const auto* data = sqlite3_column_text(stmt.handle, 0);
     std::string result(reinterpret_cast<const char*>(data), sqlite3_column_bytes(stmt.handle, 0));
-    if (result.find('\0') != std::string::npos || !valid_utf8(result))
+    if (result.find('\0') != std::string::npos || !subcard::valid_utf8(result))
         throw std::runtime_error("Document text must be UTF-8 without null characters.");
     return result;
 }
@@ -123,6 +104,8 @@ struct SubCardDocument {
     std::string saved_text;
     std::string path;
     subcard::DocumentState state;
+    subcard::ERModel er;
+    std::string saved_er;
     SubCardMode mode = SUBCARD_MODE_EDIT;
     std::uint64_t revision = 0;
     std::uint64_t saved_revision = 0;
@@ -130,6 +113,7 @@ struct SubCardDocument {
 
 struct SubCardSnapshot {
     std::uint64_t document_id;
+    std::string er_content;
     std::string text;
     std::vector<unsigned char> bytes;
     std::uint64_t revision;
@@ -146,6 +130,8 @@ SubCardDocument* subcard_document_new(void) {
         check(sqlite3_bind_text(stmt.handle, 1, subcard_greeting(), -1, SQLITE_STATIC), doc->database.handle);
         check(sqlite3_step(stmt.handle), doc->database.handle);
         subcard::initialize_document_state(doc->database.handle);
+        subcard::initialize_er(doc->database.handle, doc->er);
+        doc->saved_er = doc->er.content;
         doc->text = doc->saved_text = subcard_greeting();
         return doc.release();
     });
@@ -161,6 +147,8 @@ SubCardDocument* subcard_document_open(const char* path) {
         backup(doc->database.handle, source.handle);
         doc->state = subcard::read_document_state(doc->database.handle);
         subcard::initialize_document_state(doc->database.handle);
+        subcard::initialize_er(doc->database.handle, doc->er);
+        doc->saved_er = doc->er.content;
         doc->mode = doc->state.data_kind == SUBCARD_DATA_REAL ? SUBCARD_MODE_USE : SUBCARD_MODE_EDIT;
         doc->text = doc->saved_text = read_text(doc->database.handle);
         return doc.release();
@@ -170,13 +158,14 @@ void subcard_document_close(SubCardDocument* doc) { delete doc; }
 const char* subcard_document_text(const SubCardDocument* doc) { return doc ? doc->text.c_str() : ""; }
 const char* subcard_document_path(const SubCardDocument* doc) { return doc ? doc->path.c_str() : ""; }
 int subcard_document_is_changed(const SubCardDocument* doc) {
-    return doc && (doc->text != doc->saved_text || doc->revision != doc->saved_revision);
+    return doc && (doc->text != doc->saved_text || doc->revision != doc->saved_revision ||
+                   doc->er.content != doc->saved_er);
 }
 int subcard_document_set_text(SubCardDocument* doc, const char* text) {
     return protect(0, [=] {
         if (!doc || !text) throw std::runtime_error("Invalid document or text.");
         std::string replacement(text);
-        if (!valid_utf8(replacement)) throw std::runtime_error("Document text must be valid UTF-8.");
+        if (!subcard::valid_utf8(replacement)) throw std::runtime_error("Document text must be valid UTF-8.");
         if (replacement == doc->text) return 1;
         Statement stmt(doc->database.handle, "UPDATE document SET text=? WHERE id=1");
         check(sqlite3_bind_text(stmt.handle, 1, text, -1, SQLITE_TRANSIENT), doc->database.handle);
@@ -191,6 +180,7 @@ int subcard_document_save(SubCardDocument* doc, const char* path) {
         if (!subcard_document_is_changed(doc)) return 1;
         std::string destination_path = absolute_path(path ? path : doc->path.c_str());
         std::string saved_text = doc->text; // Allocate before committing the file.
+        std::string saved_er = doc->er.content;
         Database destination;
         open(destination, destination_path.c_str(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
         // Do not replace an unrelated SQLite database. Native save dialogs handle
@@ -202,6 +192,7 @@ int subcard_document_save(SubCardDocument* doc, const char* path) {
         backup(destination.handle, doc->database.handle);
         doc->path.swap(destination_path);
         doc->saved_text.swap(saved_text);
+        doc->saved_er.swap(saved_er);
         doc->saved_revision = doc->revision;
         return 1;
     });
@@ -214,6 +205,7 @@ SubCardSnapshot* subcard_document_snapshot(const SubCardDocument* doc) {
         if (!doc) throw std::runtime_error("Invalid document.");
         auto snapshot = std::make_unique<SubCardSnapshot>();
         snapshot->document_id = doc->id;
+        snapshot->er_content = doc->er.content;
         snapshot->text = doc->text;
         snapshot->revision = doc->revision;
         sqlite3_int64 size = 0;
@@ -237,8 +229,10 @@ int subcard_document_accept_snapshot(SubCardDocument* doc, const SubCardSnapshot
             throw std::runtime_error("The saved snapshot belongs to another document.");
         auto destination = absolute_path(path);
         auto baseline = snapshot->text;
+        auto er_baseline = snapshot->er_content;
         doc->path.swap(destination);
         doc->saved_text.swap(baseline);
+        doc->saved_er.swap(er_baseline);
         doc->saved_revision = snapshot->revision;
         return 1;
     });
@@ -262,7 +256,9 @@ int subcard_document_set_mode(SubCardDocument* doc, SubCardMode mode) {
 int subcard_document_replace_user_schema(SubCardDocument* doc, const char* sql) {
     return protect(0, [=] {
         if (!doc) throw std::runtime_error("Invalid document.");
+        if (!doc->er.graph.tables.empty()) throw std::runtime_error("The ER model owns this schema; use ER commands to edit it.");
         doc->state = subcard::replace_user_schema(doc->database.handle, doc->state, doc->mode, sql);
+        doc->er.undo.clear(); doc->er.redo.clear();
         ++doc->revision;
         return 1;
     });
@@ -271,6 +267,7 @@ int subcard_document_write_user_data(SubCardDocument* doc, SubCardDataKind kind,
     return protect(0, [=] {
         if (!doc) throw std::runtime_error("Invalid document.");
         doc->state = subcard::write_user_data(doc->database.handle, doc->state, doc->mode, kind, sql);
+        doc->er.undo.clear(); doc->er.redo.clear();
         ++doc->revision;
         return 1;
     });
@@ -279,7 +276,23 @@ int subcard_document_discard_fake_data(SubCardDocument* doc) {
     return protect(0, [=] {
         if (!doc) throw std::runtime_error("Invalid document.");
         doc->state = subcard::discard_fake_data(doc->database.handle, doc->state, doc->mode);
+        doc->er.undo.clear(); doc->er.redo.clear();
         ++doc->revision;
+        return 1;
+    });
+}
+
+const char* subcard_document_er_json(SubCardDocument* doc) {
+    return protect<const char*>(nullptr, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        doc->er.output = subcard::er_json(doc->database.handle, doc->er);
+        return doc->er.output.c_str();
+    });
+}
+int subcard_document_er_command(SubCardDocument* doc, const char* command) {
+    return protect(0, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        subcard::er_command(doc->database.handle, doc->er, doc->state, doc->mode, command);
         return 1;
     });
 }

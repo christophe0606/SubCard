@@ -53,10 +53,10 @@ struct Transaction {
     sqlite3* db;
     bool committed = false;
     explicit Transaction(sqlite3* db) : db(db) {
-        exec(db, "BEGIN IMMEDIATE; PRAGMA defer_foreign_keys=ON;");
+        exec(db, "SAVEPOINT subcard_user_write; PRAGMA defer_foreign_keys=ON;");
     }
-    ~Transaction() { if (!committed) sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr); }
-    void commit() { exec(db, "COMMIT"); committed = true; }
+    ~Transaction() { if (!committed) sqlite3_exec(db, "ROLLBACK TO subcard_user_write; RELEASE subcard_user_write", nullptr, nullptr, nullptr); }
+    void commit() { exec(db, "RELEASE subcard_user_write"); committed = true; }
 };
 bool user_name(const char* name) { return name && std::strncmp(name, "user_", 5) == 0; }
 bool user_index_name(const char* name) {
@@ -83,7 +83,10 @@ int authorize(void* context, int action, const char* first, const char* second,
     const bool schema = *static_cast<bool*>(context);
     if (source || (database && std::strcmp(database, "main") != 0)) return SQLITE_DENY;
     switch (action) {
-    case SQLITE_CREATE_TABLE: return schema && user_name(first) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_CREATE_TABLE:
+        // SQLite creates its own sequence table for INTEGER PRIMARY KEY AUTOINCREMENT.
+        // Explicit SQL cannot create sqlite_ names (SQLite reserves that namespace).
+        return schema && (user_name(first) || (first && std::strcmp(first, "sqlite_sequence") == 0)) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_CREATE_INDEX: return schema && user_name(second) && user_index_name(first) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_REINDEX: return schema && user_index_name(first) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_INSERT: case SQLITE_UPDATE: case SQLITE_DELETE:

@@ -9,14 +9,14 @@ unsafe extern "C" {
     fn subcard_document_new() -> *mut c_void;
     fn subcard_document_open(path: *const c_char) -> *mut c_void;
     fn subcard_document_close(doc: *mut c_void);
-    fn subcard_document_text(doc: *mut c_void) -> *const c_char;
     fn subcard_document_path(doc: *mut c_void) -> *const c_char;
     fn subcard_document_is_changed(doc: *mut c_void) -> c_int;
-    fn subcard_document_set_text(doc: *mut c_void, text: *const c_char) -> c_int;
     fn subcard_document_save(doc: *mut c_void, path: *const c_char) -> c_int;
     fn subcard_document_mode(doc: *mut c_void) -> c_int;
     fn subcard_document_schema_is_locked(doc: *mut c_void) -> c_int;
     fn subcard_document_set_mode(doc: *mut c_void, mode: c_int) -> c_int;
+    fn subcard_document_er_json(doc: *mut c_void) -> *const c_char;
+    fn subcard_document_er_command(doc: *mut c_void, json: *const c_char) -> c_int;
     fn subcard_last_error() -> *const c_char;
 }
 
@@ -48,8 +48,21 @@ impl Document {
             .map(Self)
             .ok_or_else(error)
     }
-    pub fn text(&self) -> String {
-        unsafe { string(subcard_document_text(self.0.as_ptr())) }
+    pub fn er_json(&self) -> Result<String, String> {
+        let ptr = unsafe { subcard_document_er_json(self.0.as_ptr()) };
+        if ptr.is_null() {
+            Err(error())
+        } else {
+            Ok(string(ptr))
+        }
+    }
+    pub fn er_command(&mut self, value: serde_json::Value) -> Result<(), String> {
+        let json = CString::new(value.to_string()).map_err(|_| "Invalid command")?;
+        if unsafe { subcard_document_er_command(self.0.as_ptr(), json.as_ptr()) } == 0 {
+            Err(error())
+        } else {
+            Ok(())
+        }
     }
     pub fn path(&self) -> Option<PathBuf> {
         let path = unsafe { string(subcard_document_path(self.0.as_ptr())) };
@@ -71,14 +84,6 @@ impl Document {
     pub fn toggle_mode(&mut self) -> Result<(), String> {
         let next = if self.using_document() { 0 } else { 1 };
         if unsafe { subcard_document_set_mode(self.0.as_ptr(), next) } == 0 {
-            Err(error())
-        } else {
-            Ok(())
-        }
-    }
-    pub fn set_text(&mut self, text: &str) -> Result<(), String> {
-        let text = CString::new(text).map_err(|_| "Text cannot contain a null character.")?;
-        if unsafe { subcard_document_set_text(self.0.as_ptr(), text.as_ptr()) } == 0 {
             Err(error())
         } else {
             Ok(())

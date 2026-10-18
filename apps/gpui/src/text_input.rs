@@ -15,6 +15,7 @@ use unicode_segmentation::*;
 actions!(
     text_input,
     [
+        Submit,
         Backspace,
         Delete,
         Left,
@@ -32,6 +33,9 @@ actions!(
         Redo,
     ]
 );
+
+pub struct Submitted;
+impl gpui::EventEmitter<Submitted> for TextInput {}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -62,6 +66,10 @@ impl TextInput {
             undo: vec![],
             redo: vec![],
         }
+    }
+    pub fn with_placeholder(mut self, placeholder: &str) -> Self {
+        self.placeholder = placeholder.to_owned().into();
+        self
     }
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
         self.reset();
@@ -633,6 +641,7 @@ impl Render for TextInput {
             .when(!self.redo.is_empty(), |this| {
                 this.on_action(cx.listener(Self::redo))
             })
+            .on_action(cx.listener(|_, _: &Submit, _, cx| cx.emit(Submitted)))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))

@@ -36,7 +36,10 @@ final class DocumentStore: ObservableObject {
     @Published private(set) var schemaLocked = false
     @Published private(set) var url: URL?
     private var owner: CoreDocument
-    private var document: OpaquePointer { owner.pointer }
+    var document: OpaquePointer { owner.pointer }
+    var finishEREditing: (Bool) -> Void = { _ in }
+    private var pendingEREdits = false
+    func erDraftChanged(_ pending: Bool) { pendingEREdits = pending; refresh() }
     weak var window: NSWindow?
     var name: String { url?.lastPathComponent ?? "Untitled" }
 
@@ -48,9 +51,9 @@ final class DocumentStore: ObservableObject {
         refresh()
     }
 
-    private func refresh() {
+    func refresh() {
         text = String(cString: subcard_document_text(document))
-        changed = subcard_document_is_changed(document) != 0
+        changed = subcard_document_is_changed(document) != 0 || pendingEREdits
         usingDocument = subcard_document_mode(document) == SUBCARD_MODE_USE
         schemaLocked = subcard_document_schema_is_locked(document) != 0
         let path = String(cString: subcard_document_path(document))
@@ -75,12 +78,14 @@ final class DocumentStore: ObservableObject {
     }
 
     func toggleMode() {
+        finishEREditing(false)
         if subcard_document_set_mode(document, usingDocument ? SUBCARD_MODE_EDIT : SUBCARD_MODE_USE) == 0 { reportError() }
         refresh()
     }
 
     @discardableResult
     func save(as saveAs: Bool = false) -> Bool {
+        finishEREditing(false)
         guard changed else { return true }
         var destination = url
         if saveAs || destination == nil {
@@ -103,6 +108,7 @@ final class DocumentStore: ObservableObject {
     }
 
     func confirmReplacement() -> Bool {
+        finishEREditing(false)
         guard changed else { return true }
         let alert = NSAlert()
         alert.messageText = "Do you want to save the changes to “\(name)”?"
@@ -121,6 +127,7 @@ final class DocumentStore: ObservableObject {
     func newDocument() -> Bool {
         guard confirmReplacement() else { return false }
         guard let next = subcard_document_new() else { reportError(); return false }
+        finishEREditing(true)
         owner = CoreDocument(next)
         refresh()
         return true
@@ -140,6 +147,7 @@ final class DocumentStore: ObservableObject {
         }
         guard let selected else { return false }
         guard let next = subcard_document_open(selected.path) else { reportError(); return false }
+        finishEREditing(true)
         owner = CoreDocument(next)
         refresh()
         return true
@@ -154,7 +162,7 @@ final class DocumentStore: ObservableObject {
         window = nil
         // Closing ends this document's lifetime, including Don't Save. Keep a
         // clean model for the next New command while macOS keeps the app open.
-        if let next = subcard_document_new() { owner = CoreDocument(next); refresh() }
+        if let next = subcard_document_new() { finishEREditing(true); owner = CoreDocument(next); refresh() }
     }
 }
 
@@ -237,36 +245,23 @@ struct SubCardApp: App {
     @FocusState private var editorIsFocused: Bool
     var body: some Scene {
         Window("SubCard", id: "document") {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(store.name).font(.title)
-                Text(store.changed ? "Edited" : "No unsaved changes").foregroundStyle(.secondary)
-                DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
-                Text("Document text")
-                TextField("Document text", text: Binding(get: { store.text }, set: { store.setText($0) }))
-                    // The native rounded style fixes the control height at a
-                    // size that clips this larger font. Let the plain field
-                    // size to its text and draw the border around its padding.
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 24))
-                    .focused($editorIsFocused)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(minHeight: 48)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(editorIsFocused ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1)
-                            .allowsHitTesting(false)
-                    }
-                Spacer()
+            VStack(spacing: 0) {
+                HStack {
+                    Text(store.name).font(.headline)
+                    Text(store.changed ? "Edited" : "Saved").foregroundStyle(.secondary)
+                    Spacer()
+                    DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
+                }.padding(12)
+                Divider()
+                ERCanvasEditor(document: store.document, changed: store.refresh,
+                    registerEditor: { store.finishEREditing = $0 }, draftChanged: { [weak store] in store?.erDraftChanged($0) })
             }
-            .padding(32)
-            .frame(minWidth: 480, minHeight: 280)
+            .frame(minWidth: 720, minHeight: 480)
             .background(WindowObserver(store: store))
             .onOpenURL { store.openDocument(at: $0) }
         }
-        .defaultSize(width: 720, height: 440)
-        .commands { DocumentCommands(store: store) }
+        .defaultSize(width: 1180, height: 760)
+        .commands { DocumentCommands(store: store); ERCommands() }
     }
 }
 #else

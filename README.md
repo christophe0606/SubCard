@@ -15,8 +15,15 @@ format, with a mobile editor and Files-based Open/Save controls. Its build,
 development signature, USB installation, and launch on an iPhone 12 Pro Max are
 verified. On-device editor and file-provider interactions still need testing.
 
-The current editor is a small document-text field initialized with **Hello World**
-from C++. Full card editing and scripting are future work.
+The editor includes an **entity relationship canvas** for the user data model.
+Create tables, indexed fields with optional uniqueness, and connection (foreign-key)
+fields; draw relationships,
+choose one-to-one or one-to-many cardinality and cascade/block deletion, and
+edit names and colors in the inspector. Pan, zoom, fit, calibrated 100% scale,
+clipboard duplication and undo/redo are supported. Diagram layout and viewport
+are saved inside the document. Mac uses a resizable inspector; iPhone uses a
+separate details screen. Full card editing, ordinary data fields and scripting
+are future work.
 
 Each document separates application-owned system tables from its user-defined
 entity/relationship schema. User data has one global state across **all user
@@ -24,8 +31,8 @@ tables**: none, fake, or real. Empty/fake documents open in editing mode; docume
 with real data open in use mode and can return to editing. The first real data
 permanently locks the user schema: version 1 has no schema migration. Fake data
 can be discarded to change its schema. The shared core enforces these rules;
-the current interfaces provide basic mode controls while detailed mode-specific
-workflows remain future work.
+the canvas respects these mode and schema-lock rules. Detailed use-mode workflows
+remain future work.
 
 ## Architecture overview
 
@@ -82,6 +89,7 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 
 ## Documentation
 
+- [Entity relationship canvas, command architecture, design decisions, and tests](documentation/features/entity-relationship-canvas.md)
 - [Architecture and principles](documentation/architecture.md)
 - [Document lifecycle, global data states, modes, and schema locking](documentation/features/document-lifecycle.md)
 - [Development, prerequisites, build storage, and platform scope](documentation/development.md)

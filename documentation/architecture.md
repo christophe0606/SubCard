@@ -96,3 +96,13 @@ simulator runtime is needed for that build.
 SQLite documents and text editing are implemented. Card layout and scripting
 remain future work. The [hello-world feature](features/hello-world.md) records
 the original bootstrap.
+
+## Entity relationship editor
+
+The [ER canvas architecture](features/entity-relationship-canvas.md) specifies the
+versioned JSON command boundary shared by SwiftUI, GPUI and future scripting.
+`ERModel.cpp` validates graph mutations, generates stable-ID SQLite table/index
+and foreign-key definitions, stores layout/view metadata in system tables, and
+owns model undo/redo. Frontends own rendering, hit testing, selection, clipboard
+transport and inspectors. A completed move submits one command. Viewport writes
+persist independently of history, so navigation cannot consume model undo.

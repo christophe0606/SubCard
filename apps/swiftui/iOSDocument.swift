@@ -75,9 +75,14 @@ final class PhoneDocumentStore: ObservableObject {
         text = String(cString: subcard_document_text(pointer))
     }
 
-    private func refresh() {
+    var document: OpaquePointer { owner.pointer }
+    var finishEREditing: (Bool) -> Void = { _ in }
+    private var pendingEREdits = false
+    func erDraftChanged(_ pending: Bool) { pendingEREdits = pending; refresh() }
+
+    func refresh() {
         text = String(cString: subcard_document_text(owner.pointer))
-        changed = subcard_document_is_changed(owner.pointer) != 0
+        changed = subcard_document_is_changed(owner.pointer) != 0 || pendingEREdits
         usingDocument = subcard_document_mode(owner.pointer) == SUBCARD_MODE_USE
         schemaLocked = subcard_document_schema_is_locked(owner.pointer) != 0
     }
@@ -89,6 +94,7 @@ final class PhoneDocumentStore: ObservableObject {
     }
 
     func toggleMode() {
+        finishEREditing(false)
         if subcard_document_set_mode(owner.pointer, usingDocument ? SUBCARD_MODE_EDIT : SUBCARD_MODE_USE) == 0 {
             error = DocumentFailure.core().message
         }
@@ -97,6 +103,7 @@ final class PhoneDocumentStore: ObservableObject {
 
     func request(_ intent: Intent) {
         guard !busy else { return }
+        finishEREditing(false)
         if changed { pending = intent; confirming = true }
         else { perform(intent) }
     }
@@ -105,6 +112,7 @@ final class PhoneDocumentStore: ObservableObject {
         switch intent {
         case .new:
             guard let pointer = subcard_document_new() else { error = DocumentFailure.core().message; return }
+            finishEREditing(true)
             owner = PhoneCoreDocument(pointer)
             url = nil
             refresh()
@@ -149,12 +157,14 @@ final class PhoneDocumentStore: ObservableObject {
         }
         if let failure = coordinationError ?? failure { report(failure); return }
         guard let next else { error = "The document could not be opened."; return }
+        finishEREditing(true)
         owner = next
         url = selected // Preserve the file provider's security-scoped URL.
         refresh()
     }
 
     func save(as saveAs: Bool = false, after: Intent? = nil) {
+        finishEREditing(false)
         guard !busy, changed else { return }
         do {
             let snapshot = try DocumentSnapshot(document: owner.pointer)
@@ -242,44 +252,11 @@ struct PhoneDocumentView: View {
     @FocusState private var editing: Bool
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(store.name).font(.title2).bold().lineLimit(2)
-                Text(store.changed ? "Edited" : "No unsaved changes")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
-                    .disabled(store.busy)
-                HStack {
-                    Text("Document text").font(.headline)
-                    Spacer()
-                    Button {
-                        editing.toggle()
-                    } label: {
-                        Label(editing ? "Done" : "Edit text", systemImage: editing ? "checkmark" : "square.and.pencil")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(store.busy)
-                }
-                Text("Tap the text below to edit it.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: Binding(get: { store.text }, set: { store.setText($0) }))
-                    .font(.title3)
-                    .focused($editing)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 120)
-                    .background(Color(uiColor: .secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(editing ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: editing ? 2 : 1)
-                            .allowsHitTesting(false)
-                    }
-                    .accessibilityLabel("Document text")
-                    .accessibilityHint("Editable text. Double-tap to start editing.")
-                    .disabled(store.busy)
+            VStack(spacing: 0) {
+                DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode).padding(8)
+                ERCanvasEditor(document: store.document, changed: store.refresh,
+                    registerEditor: { store.finishEREditing = $0 }, draftChanged: { [weak store] in store?.erDraftChanged($0) }).disabled(store.busy)
             }
-            .padding()
             .navigationTitle("SubCard")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -301,7 +278,7 @@ struct PhoneDocumentView: View {
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("Done") { editing = false }
+                    Button("Done") { store.finishEREditing(false); UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
                 }
             }
         }

@@ -23,6 +23,18 @@ fn main() {
         backend.join("src/UserData.h").display()
     );
 
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/ERModel.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/ERModel.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/UTF8.h").display()
+    );
     cc::Build::new()
         .cpp(true)
         .std("c++17")
@@ -31,6 +43,7 @@ fn main() {
         .file(source)
         .file(backend.join("src/Document.cpp"))
         .file(backend.join("src/UserData.cpp"))
+        .file(backend.join("src/ERModel.cpp"))
         .warnings(true)
         .compile("subcard_core");
 

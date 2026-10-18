@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 mod document;
+mod er;
 mod lifecycle;
 mod text_input;
 
 use document::Document;
 use gpui::{prelude::*, *};
 use std::path::PathBuf;
-use text_input::{Copy, Cut, Paste, Redo, SelectAll, TextInput, Undo};
+use text_input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 
 actions!(
     subcard,
@@ -37,28 +38,20 @@ enum Intent {
 
 struct SubCardView {
     document: Document,
-    input: Entity<TextInput>,
     busy: bool,
     file_menu: bool,
     error: Option<String>,
+    er: er::ERState,
 }
 
 impl SubCardView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document = Document::new().expect("Cannot create the initial SQLite document");
-        let input = cx.new(|cx| TextInput::new(document.text(), cx));
-        cx.observe(&input, |this, input, cx| {
-            if let Err(error) = this.document.set_text(&input.read(cx).content) {
-                this.error = Some(error);
-            }
-            cx.notify();
-        })
-        .detach();
-        window.focus(&input.focus_handle(cx));
         let entity = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             entity
                 .update(cx, |this, cx| {
+                    this.er_commit_names(cx);
                     if this.document.changed() || this.busy {
                         this.request(Intent::Close, window, cx);
                         false
@@ -68,9 +61,11 @@ impl SubCardView {
                 })
                 .unwrap_or(true)
         });
+        let er = er::ERState::new(window, cx);
+        window.focus(&er.focus);
         Self {
+            er,
             document,
-            input,
             busy: false,
             file_menu: false,
             error: None,
@@ -81,6 +76,7 @@ impl SubCardView {
         if self.busy {
             return;
         }
+        self.er_commit_names(cx);
         self.file_menu = false;
         if !self.document.changed() {
             self.perform(intent, window, cx);
@@ -118,12 +114,11 @@ impl SubCardView {
     ) {
         match result {
             Ok(document) => {
-                let content = document.text();
                 self.document = document;
-                self.input
-                    .update(cx, |input, cx| input.set_content(content, cx));
+                self.er = er::ERState::new(window, cx);
+                self.er_refresh();
                 self.error = None;
-                window.focus(&self.input.focus_handle(cx));
+                window.focus(&self.er.focus);
             }
             Err(error) => self.show_error(error, window, cx),
         }
@@ -210,6 +205,7 @@ impl SubCardView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.er_commit_names(cx);
         if self.busy || !self.document.changed() {
             return;
         }
@@ -250,7 +246,7 @@ impl SubCardView {
 
 impl Render for SubCardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dirty = self.document.changed();
+        let dirty = self.document.changed() || self.er_has_draft(cx);
         let name = self
             .document
             .path()
@@ -345,65 +341,54 @@ impl Render for SubCardView {
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .p_8()
                     .gap_4()
-                    .child(div().text_size(px(24.)).child(name))
+                    .p_2()
+                    .items_center()
+                    .child(div().font_weight(FontWeight::BOLD).child(name))
+                    .child(if dirty { "Edited" } else { "Saved" })
                     .child(
                         div()
-                            .flex()
-                            .gap_4()
+                            .id("mode")
+                            .cursor_pointer()
+                            .text_color(rgb(0x0066cc))
                             .child(if self.document.using_document() {
-                                "Use mode"
+                                "Use mode · Edit document"
                             } else {
-                                "Editing mode"
+                                "Editing mode · Use document"
                             })
-                            .child(
-                                div()
-                                    .id("document-mode")
-                                    .child(if self.document.using_document() {
-                                        "Edit document"
-                                    } else {
-                                        "Use document"
-                                    })
-                                    .text_color(rgb(0x0066cc))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, w, cx| {
-                                        if !this.busy {
-                                            if let Err(error) = this.document.toggle_mode() {
-                                                this.show_error(error, w, cx);
-                                            }
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
+                            .on_click(cx.listener(|s, _, w, cx| {
+                                s.er_commit_names(cx);
+                                if let Err(e) = s.document.toggle_mode() {
+                                    s.show_error(e, w, cx);
+                                }
+                                cx.notify();
+                            })),
                     )
-                    .when(self.document.schema_locked(), |el| {
-                        el.child(div().text_color(rgb(0x606060)).child("User schema locked"))
-                    })
-                    .child(div().text_color(rgb(0x606060)).child(if dirty {
-                        "Edited"
-                    } else {
-                        "No unsaved changes"
-                    }))
-                    .child("Document text")
-                    .child(self.input.clone())
-                    .when_some(self.error.clone(), |el, error| {
-                        el.child(div().text_color(rgb(0xb00020)).child(error))
-                    }),
+                    .when(self.document.schema_locked(), |d| d.child("Schema locked")),
             )
+            .child(self.er_render(cx))
+            .when_some(self.error.clone(), |d, error| {
+                d.child(div().p_2().text_color(rgb(0xb00020)).child(error))
+            })
     }
 }
 
 fn main() {
     Application::new().run(|cx: &mut App| {
         cx.bind_keys([
+            KeyBinding::new("secondary-z", Undo, Some("ERCanvas")),
+            KeyBinding::new("secondary-shift-z", Redo, Some("ERCanvas")),
+            KeyBinding::new("secondary-c", Copy, Some("ERCanvas")),
+            KeyBinding::new("secondary-v", Paste, Some("ERCanvas")),
+            KeyBinding::new("delete", text_input::Delete, Some("ERCanvas")),
+            KeyBinding::new("backspace", text_input::Delete, Some("ERCanvas")),
             KeyBinding::new("secondary-n", NewDocument, None),
             KeyBinding::new("secondary-o", OpenDocument, None),
             KeyBinding::new("secondary-s", Save, None),
             KeyBinding::new("secondary-shift-s", SaveAs, None),
             KeyBinding::new("secondary-w", Close, None),
             KeyBinding::new("secondary-q", Quit, None),
+            KeyBinding::new("enter", text_input::Submit, Some("TextInput")),
             KeyBinding::new("secondary-a", SelectAll, Some("TextInput")),
             KeyBinding::new("secondary-c", Copy, Some("TextInput")),
             KeyBinding::new("secondary-x", Cut, Some("TextInput")),
@@ -489,11 +474,11 @@ fn main() {
                 ],
             },
         ]);
-        let bounds = Bounds::centered(None, size(px(720.), px(440.)), cx);
+        let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(480.), px(280.))),
+                window_min_size: Some(size(px(720.), px(480.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Untitled — SubCard".into()),
                     ..Default::default()
