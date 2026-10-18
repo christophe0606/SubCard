@@ -125,6 +125,41 @@ bool ordinary(const std::string &kind) {
            kind == "integer" || kind == "boolean" || kind == "blob";
 }
 bool indexable(const std::string &kind) { return ordinary(kind) && kind != "blob" && kind != "decimal"; }
+std::vector<std::string> view_groups(const ERField &f) {
+    if (f.kind == "blob") return {"none"};
+    std::vector<std::string> groups{"none", "count"};
+    if (f.kind == "integer" || f.kind == "float") {
+        groups.push_back("sum"); groups.push_back("avg");
+    }
+    // Packed BCD byte ordering is not numeric ordering.
+    if (f.kind != "decimal" && f.kind != "boolean") {
+        groups.push_back("min"); groups.push_back("max");
+    }
+    return groups;
+}
+bool grouped(const ERDataView &v) {
+    return std::any_of(v.columns.begin(), v.columns.end(), [](const auto &c) { return c.group != "none"; });
+}
+std::string data_view_sql(const ERDataView &v) {
+    if (!v.table || v.columns.empty()) return "";
+    std::string sql = "SELECT ";
+    std::vector<std::string> keys;
+    const bool aggregate = grouped(v);
+    if (!aggregate) sql += "id AS \"__subcard_row_id\", ";
+    for (size_t i = 0; i < v.columns.size(); ++i) {
+        const auto &c = v.columns[i];
+        const auto column = "f" + num(c.field);
+        if (i) sql += ", ";
+        if (c.group == "none") { sql += column; keys.push_back(column); }
+        else sql += c.group + "(" + column + ") AS " + column + "_" + c.group;
+    }
+    sql += " FROM user_t" + num(v.table);
+    if (aggregate && !keys.empty()) {
+        sql += " GROUP BY ";
+        for (size_t i = 0; i < keys.size(); ++i) { if (i) sql += ", "; sql += keys[i]; }
+    }
+    return sql;
+}
 std::vector<std::pair<std::string, std::string>> check_names(const ERTable &t, bool display = false) {
     std::vector<std::pair<std::string, std::string>> result;
     for (const auto &f : t.fields)
@@ -152,7 +187,7 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
             checks = checks || !f.check.empty();
         }
     }
-    std::string s = std::string("{\"version\":") + (checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
+    std::string s = std::string("{\"version\":") + (!g.views.empty() ? "6" : checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -204,7 +239,40 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
              ",\"many\":" + (e.many ? "true" : "false") + ",\"cascade\":" + (e.cascade ? "true" : "false") +
              "}";
     }
-    return s + "]}";
+    s += "]";
+    if (!g.views.empty()) {
+        s += ",\"views\":[";
+        first = true;
+        for (const auto &v : g.views) {
+            if (!first) s += ",";
+            first = false;
+            s += "{\"id\":" + num(v.id) + ",\"name\":" + quote(db, v.name) +
+                 ",\"table\":" + num(v.table) + ",\"x\":" + num(v.x) + ",\"y\":" + num(v.y) + ",\"columns\":[";
+            bool firstColumn = true;
+            for (const auto &c : v.columns) {
+                if (!firstColumn) s += ",";
+                firstColumn = false;
+                s += "{\"field\":" + num(c.field) + ",\"group\":" + quote(db, c.group) + "}";
+            }
+            s += "]";
+            if (display) {
+                s += ",\"sql\":" + quote(db, data_view_sql(v)) + ",\"grouped\":" + (grouped(v) ? "true" : "false") + ",\"availableColumns\":[";
+                bool firstField = true;
+                for (const auto &t : g.tables) if (t.id == v.table) for (const auto &f : t.fields) if (!legacy(f)) {
+                    if (!firstField) s += ",";
+                    firstField = false;
+                    s += "{\"field\":" + num(f.id) + ",\"name\":" + quote(db, f.name) + ",\"kind\":" + quote(db, f.kind) + ",\"groups\":[";
+                    const auto groups = view_groups(f);
+                    for (size_t i = 0; i < groups.size(); ++i) { if (i) s += ","; s += quote(db, groups[i]); }
+                    s += "]}";
+                }
+                s += "]";
+            }
+            s += "}";
+        }
+        s += "]";
+    }
+    return s + "}";
 }
 ERTable table_from(const JSON &j) {
     ERTable t{j.id("id"), j.str("name"), j.str("color"), j.number("x"), j.number("y"), {}, {}};
@@ -224,7 +292,7 @@ ERTable table_from(const JSON &j) {
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") >= 1 && j.id("version") <= 5, "Unsupported ER model version.");
+    require(j.id("version") >= 1 && j.id("version") <= 6, "Unsupported ER model version.");
     ERGraph g;
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
@@ -232,6 +300,14 @@ ERGraph graph_from(const JSON &j) {
         require(j.id("version") >= 2 || e.id("field") != 0, "Version-1 edges require a foreign-key field.");
         g.edges.push_back({e.id("id"), e.id("table"), e.id("field"), e.id("target"), e.id("targetField"),
                            e.boolean("many"), e.boolean("cascade")});
+    }
+    if (!j.type("views").empty()) {
+        require(j.id("version") >= 6, "Views require ER model version 6.");
+        for (const auto &v : j.array("views")) {
+            ERDataView view{v.id("id"), v.str("name"), v.id("table"), v.number("x"), v.number("y"), {}};
+            for (const auto &c : v.array("columns")) view.columns.push_back({c.id("field"), c.str("group")});
+            g.views.push_back(std::move(view));
+        }
     }
     return g;
 }
@@ -253,6 +329,10 @@ EREdge &edge(ERGraph &g, int id) {
             return e;
     throw std::runtime_error("Connection no longer exists.");
 }
+ERDataView &data_view(ERGraph &g, int id) {
+    for (auto &v : g.views) if (v.id == id) return v;
+    throw std::runtime_error("View no longer exists.");
+}
 std::string lower(std::string s) {
     for (char &c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -266,7 +346,7 @@ void name(const std::string &s) {
         require(c >= 32 && c != 127, "Names cannot contain control characters.");
 }
 int validate(ERGraph &g) {
-    require(g.tables.size() <= 1000 && g.edges.size() <= 10000, "ER model is too large.");
+    require(g.tables.size() <= 1000 && g.edges.size() <= 10000 && g.views.size() <= 1000, "ER model is too large.");
     std::set<int> ids;
     std::set<std::string> names;
     int highest = 0;
@@ -326,6 +406,25 @@ int validate(ERGraph &g) {
                 "Connections must end at a primary key or a unique index.");
         require(connected.insert(e.field).second, "This foreign-key field already has a connection.");
         require(e.many || !e.cascade, "Cascade applies only to one-to-many connections.");
+    }
+    std::set<std::string> viewNames;
+    for (const auto &v : g.views) {
+        id(v.id); name(v.name);
+        require(viewNames.insert(lower(v.name)).second, "View names must be unique.");
+        require(std::isfinite(v.x) && std::isfinite(v.y) && v.x >= 0 && v.y >= 0 && v.x <= 100000 && v.y <= 100000,
+                "View position is out of range.");
+        require(v.table || v.columns.empty(), "Choose a source table first.");
+        if (!v.table) continue;
+        auto &t = table(g, v.table);
+        std::set<int> selected;
+        for (const auto &c : v.columns) {
+            auto &f = field(t, c.field);
+            require(!legacy(f), "Generated keys are not view columns.");
+            require(selected.insert(c.field).second, "A view column can be selected only once.");
+            const auto groups = view_groups(f);
+            require(std::find(groups.begin(), groups.end(), c.group) != groups.end(), "This grouping is not supported for the column datatype.");
+            require(!grouped(v) || f.kind != "blob", "Remove blob columns before choosing an aggregate.");
+        }
     }
     return highest;
 }
@@ -518,6 +617,38 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         require(!list.empty(), "No action to undo or redo.");
         g = undo ? list.back().before : list.back().after;
         changesSchema = list.back().schema;
+    } else if (op == "add_data_view") {
+        ERDataView v{next++, j.str("name"), j.id("table"), j.number("x"), j.number("y"), {}};
+        if (v.table) for (const auto &f : table(g, v.table).fields) if (!legacy(f)) v.columns.push_back({f.id, "none"});
+        g.views.push_back(std::move(v));
+        changesSchema = false;
+    } else if (op == "update_data_view") {
+        auto &v = data_view(g, j.id("id"));
+        if (!j.type("name").empty()) v.name = j.str("name");
+        if (!j.type("table").empty() && j.id("table") != v.table) {
+            v.table = j.id("table"); v.columns.clear();
+            if (v.table) for (const auto &f : table(g, v.table).fields) if (!legacy(f)) v.columns.push_back({f.id, "none"});
+        }
+        changesSchema = false;
+    } else if (op == "set_view_column") {
+        auto &v = data_view(g, j.id("id"));
+        const int fieldID = j.id("field");
+        require(!legacy(field(table(g, v.table), fieldID)), "Generated keys are not view columns.");
+        auto it = std::find_if(v.columns.begin(), v.columns.end(), [&](const auto &c) { return c.field == fieldID; });
+        if (!j.boolean("included")) {
+            if (it != v.columns.end()) v.columns.erase(it);
+        } else {
+            const auto group = j.type("group").empty() ? "none" : j.str("group");
+            if (it == v.columns.end()) v.columns.push_back({fieldID, group}); else it->group = group;
+        }
+        changesSchema = false;
+    } else if (op == "move_data_view") {
+        auto &v = data_view(g, j.id("id")); v.x = j.number("x"); v.y = j.number("y");
+        changesSchema = false;
+    } else if (op == "delete_data_view") {
+        const int id = j.id("id"); data_view(g, id);
+        g.views.erase(std::remove_if(g.views.begin(), g.views.end(), [&](const auto &v) { return v.id == id; }), g.views.end());
+        changesSchema = false;
     } else if (op == "add_table") {
         g.tables.push_back({next++, j.str("name"), "#397DB8", j.number("x"), j.number("y"), {}, {}});
     } else if (op == "paste_table") {
@@ -569,6 +700,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(),
                                      [&](auto &e) { return e.table == id || e.target == id; }),
                       g.edges.end());
+        g.views.erase(std::remove_if(g.views.begin(), g.views.end(), [&](const auto &v) { return v.table == id; }), g.views.end());
     } else if (op == "add_constraint") {
         auto &t = table(g, j.id("table"));
         t.constraints.push_back({next++, j.str("name"), user_check(t, j.str("expression", 4096))});
@@ -621,6 +753,8 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         require(!legacy(field(t, id)), "Generated keys are managed through relationships.");
         t.fields.erase(std::remove_if(t.fields.begin(), t.fields.end(),
                                       [&](const auto &f) { return f.id == id; }), t.fields.end());
+        for (auto &v : g.views) if (v.table == t.id)
+            v.columns.erase(std::remove_if(v.columns.begin(), v.columns.end(), [&](const auto &c) { return c.field == id; }), v.columns.end());
     } else if (op == "add_index") {
         ERField f{next++, j.str("name"), j.str("kind"), j.type("unique").empty() ? true : j.boolean("unique")};
         require(legacy(f), "Use add_field for ordinary data fields.");

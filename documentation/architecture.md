@@ -140,6 +140,24 @@ renaming fields only changes display labels. The storage authorizer and validato
 share the same function allowlist. Desktop and iPhone retain their own editing
 presentation. See the [CHECK constraint contract](features/check-constraints.md).
 
+## View definitions and planned result editing
+
+The [view column builder](features/views.md) implements the first query-definition
+UI and shared model. ER metadata version 6 stores saved projections and typed
+aggregate choices without creating physical SQLite views or changing user tables.
+SQL includes hidden row identity only for nonaggregate projections. Desktop
+inspectors and the separate iPhone View page consume backend-provided columns
+and operation choices. Result display/editing and broader query clauses remain
+future work.
+
+The [editable query result design](features/editable-query-results.md) specifies
+a future shared-core analyzer and write protocol. It proves that each result row
+identifies one anchor record, admits conservative integer-key lookup joins, and
+separates writable anchor fields from derived/related fields. Insert plans are
+analyzed independently. Unsupported SQL remains read-only; writes require hidden
+identity, transactional membership validation and the existing lifecycle policy.
+This is an implementation reference, not an implemented feature.
+
 ## Native desktop and iPhone presentation
 
 These rules apply to new features in both frontends and are also recorded in

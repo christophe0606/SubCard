@@ -31,7 +31,7 @@ struct ERCanvasEditor: View {
       #else
         ERCanvasSurface(store: store)
           .navigationDestination(isPresented: $store.showDetails) {
-            ERInspector(store: store).navigationTitle("Details")
+            ERInspector(store: store).navigationTitle(store.dataView == nil ? "Details" : "View")
           }
       #endif
     }
@@ -96,6 +96,8 @@ private struct ERInspector: View {
               finishEditing()
               store.command("delete_connection", ["id": e.id])
             }.disabled(!schemaEditable)
+          } else if let v = store.dataView {
+            ERDataViewProperties(store: store, view: v)
           } else if let t = store.table {
             Text(t.name).font(.headline).accessibilityIdentifier("modelTableName")
             nameInput("Table name", text: $store.tableNameDraft, focus: .table)
@@ -134,7 +136,7 @@ private struct ERInspector: View {
               }.disabled(!schemaEditable)
             #endif
           } else {
-            Text("Select a table or relationship arrow to edit its properties.").foregroundStyle(
+            Text("Select a table, view or relationship arrow to edit its properties.").foregroundStyle(
               .secondary)
             Text(
               "Drag a table to move it. Drag its right circle to another table to create a relationship."
@@ -472,6 +474,103 @@ private struct ERInspector: View {
   }
 }
 
+private struct ERDataViewProperties: View {
+  @ObservedObject var store: ERStore
+  let view: ERDataView
+  @FocusState private var nameFocused: Bool
+  private var selected: [ERViewAvailableColumn] {
+    view.columns.compactMap { c in view.availableColumns.first { $0.field == c.field } }
+  }
+  private var ignored: [ERViewAvailableColumn] {
+    view.availableColumns.filter { f in !view.columns.contains { $0.field == f.field } }
+  }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Label("View", systemImage: "tablecells").font(.headline)
+      TextField("View name", text: $store.tableNameDraft).textFieldStyle(.roundedBorder)
+        .focused($nameFocused).onSubmit { store.commitNames() }
+        .disabled(!store.editable).accessibilityIdentifier("viewName")
+      Picker("Source table", selection: Binding(get: { view.table }, set: { id in
+        store.command("update_data_view", ["id": view.id, "table": id])
+      })) {
+        Text("Choose a table").tag(0)
+        ForEach(store.graph.tables) { Text($0.name).tag($0.id) }
+      }.pickerStyle(.menu).disabled(!store.editable).accessibilityIdentifier("viewSourceTable")
+      Text("Selected columns").font(.headline)
+      if selected.isEmpty {
+        Text("Choose columns below to include them in this view.").font(.caption).foregroundStyle(.secondary)
+      }
+      chips(selected, included: true)
+      Divider()
+      Text("Ignored columns").font(.headline)
+      if ignored.isEmpty {
+        Text(view.table == 0 ? "Choose a source table first." : "All columns are selected.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      chips(ignored, included: false)
+      if view.grouped {
+        Text("Columns set to None define the groups. Aggregate columns summarize each group.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      if view.columns.isEmpty && view.table != 0 {
+        Text("Select at least one column to complete the view.").font(.caption).foregroundStyle(.secondary)
+      }
+    }
+    .onChange(of: nameFocused) { focused in
+      store.editingText = focused
+      if !focused { store.commitNames() }
+    }
+    .onDisappear { store.commitNames(); store.editingText = false }
+  }
+  private func chips(_ fields: [ERViewAvailableColumn], included: Bool) -> some View {
+    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .leading)], alignment: .leading, spacing: 8) {
+      ForEach(fields) { f in
+        HStack(spacing: 8) {
+          if included {
+            Button { store.setViewColumn(f.field, included: false) } label: {
+              Image(systemName: "xmark.circle.fill")
+                .frame(minWidth: 28, minHeight: 36)
+            }.buttonStyle(.plain).accessibilityLabel("Ignore \(f.name)")
+            columnTitle(f)
+            Spacer(minLength: 0)
+            if f.groups.count > 1 {
+              Menu {
+                ForEach(f.groups, id: \.self) { group in
+                  Button {
+                    store.setViewColumn(f.field, included: true, group: group)
+                  } label: {
+                    if view.columns.first(where: { $0.field == f.field })?.group == group {
+                      Label(erGroupTitle(group), systemImage: "checkmark")
+                    } else { Text(erGroupTitle(group)) }
+                  }
+                }
+              } label: {
+                Image(systemName: "chevron.down").frame(minWidth: 24, minHeight: 36)
+              }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("Group \(f.name)")
+            }
+          } else {
+            Button { store.setViewColumn(f.field, included: true) } label: {
+              columnTitle(f).frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+            }.buttonStyle(.plain).accessibilityLabel("Include \(f.name)")
+          }
+        }.padding(.horizontal, 10).padding(.vertical, 4)
+          .background(RoundedRectangle(cornerRadius: 10).fill(included ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08)))
+          .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
+          .disabled(!store.editable)
+      }
+    }
+  }
+  private func columnTitle(_ f: ERViewAvailableColumn) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(f.name).fontWeight(.medium).lineLimit(2)
+      if let c = view.columns.first(where: { $0.field == f.field }), c.group != "none" {
+        Text(erGroupTitle(c.group)).font(.caption).foregroundStyle(.secondary)
+      }
+    }
+  }
+}
+
 private struct ERCheckDraft: Identifiable {
   let id = UUID()
   var table: Int
@@ -593,9 +692,12 @@ private struct ERCanvasSurface: View {
   @State private var pinchStart: ERViewport?
   @State private var pinchAnchor = CGPoint.zero
   private let width = 320.0
+  private var canDelete: Bool {
+    store.editable && (store.dataView != nil || (!store.locked && (store.table != nil || store.edge != nil)))
+  }
   private var scale: Double { store.viewport.zoom * store.viewport.calibration }
   private var tables: [ERTable] {
-    store.graph.tables.map { t in
+    store.graph.nodes.map { t in
       var t = t
       if t.id == moving, let preview {
         t.x = preview.x
@@ -614,23 +716,16 @@ private struct ERCanvasSurface: View {
       VStack(spacing: 0) {
         ScrollView(.horizontal, showsIndicators: false) {
           HStack(spacing: 14) {
-            Button {
-              store.addTable()
-              #if os(macOS)
-                canvasFocused = true
-              #endif
+            Menu {
+              Button("Table", systemImage: "tablecells") { store.addTable() }
+                .disabled(store.locked)
+              Button("Connection", systemImage: "arrow.triangle.branch") { store.beginConnection() }
+                .disabled(store.locked || store.table == nil)
+              Button("View", systemImage: "rectangle.on.rectangle") { store.addDataView() }
             } label: {
-              Label("Table", systemImage: "plus")
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel("Add table")
-            .disabled(!store.editable || store.locked)
-            Button {
-              store.beginConnection()
-            } label: {
-              Label("Relationship", systemImage: "arrow.triangle.branch")
-            }.disabled(!store.editable || store.locked || store.table == nil)
-              .accessibilityLabel("Create relationship from selected table")
+              Label("Create", systemImage: "plus")
+            }.buttonStyle(.borderedProminent).disabled(!store.editable)
+              .accessibilityLabel("Create")
             Menu {
               Button("Fit to Window", systemImage: "arrow.up.left.and.arrow.down.right") {
                 fit(outer.size)
@@ -676,7 +771,8 @@ private struct ERCanvasSurface: View {
                   "Delete", systemImage: "trash", role: .destructive, action: store.deleteSelection
                 )
                 .disabled(
-                  (store.table == nil && store.edge == nil) || store.locked || !store.editable)
+                  (store.table == nil && store.edge == nil && store.dataView == nil)
+                    || (store.locked && store.dataView == nil) || !store.editable)
               } label: {
                 Label("Edit", systemImage: "ellipsis").labelStyle(.iconOnly)
               }
@@ -716,7 +812,7 @@ private struct ERCanvasSurface: View {
               #else
                 .focusable().focused($canvasFocused)
                 .onAppear { canvasFocused = true }
-                .onDeleteCommand { if store.editable && !store.locked { store.deleteSelection() } }
+                .onDeleteCommand(perform: canDelete ? { store.deleteSelection() } : nil)
                 .onCopyCommand(perform: store.table == nil ? nil : { store.clipboardProviders() })
                 .onCutCommand(
                   perform: store.table == nil || !store.editable || store.locked
@@ -746,7 +842,7 @@ private struct ERCanvasSurface: View {
                   }.onEnded { _ in pinchStart = nil })
               #endif
               .overlay(alignment: .bottomLeading) {
-                if store.graph.tables.isEmpty {
+                if store.graph.nodes.isEmpty {
                   Text(
                     "Add a table to start your data model\nDrag the background to pan • Choose a zoom percentage or pinch"
                   )
@@ -807,6 +903,7 @@ private struct ERCanvasSurface: View {
   }
   private func hitPort(_ p: CGPoint, right: Bool) -> Int? {
     for t in tables.reversed() {
+      if store.graph.views.contains(where: { $0.id == t.id }) { continue }
       let q = port(t, right: right)
       if hypot(p.x - q.x, p.y - q.y) < max(12, 14 / scale) { return t.id }
     }
@@ -900,8 +997,10 @@ private struct ERCanvasSurface: View {
       title.draw(
         Text(t.name).font(.system(size: 72 / 2.54 * scale, weight: .semibold)).foregroundColor(
           .white), at: CGPoint(x: p.x + 16 * scale, y: p.y + 30 * scale), anchor: .leading)
-      circle(&ctx, port(t, right: false), selected: false)
-      circle(&ctx, port(t, right: true), selected: store.pendingSource == t.id)
+      if !store.graph.views.contains(where: { $0.id == t.id }) {
+        circle(&ctx, port(t, right: false), selected: false)
+        circle(&ctx, port(t, right: true), selected: store.pendingSource == t.id)
+      }
     }
     if let source = store.pendingSource, let table = tables.first(where: { $0.id == source }),
       let linkPreview
@@ -941,7 +1040,7 @@ private struct ERCanvasSurface: View {
         }
       }
     }
-    if let moving, let table = store.graph.tables.first(where: { $0.id == moving }) {
+    if let moving, let table = store.graph.nodes.first(where: { $0.id == moving }) {
       preview = CGPoint(
         x: min(100000, max(0, table.x + translation.width / scale)),
         y: min(100000, max(0, table.y + translation.height / scale)))
@@ -960,7 +1059,8 @@ private struct ERCanvasSurface: View {
     let tapped = hypot(location.x - start.x, location.y - start.y) < 5
     if let moving, let preview {
       if !tapped {
-        store.command("move_table", ["id": moving, "x": preview.x, "y": preview.y])
+        let op = store.graph.views.contains(where: { $0.id == moving }) ? "move_data_view" : "move_table"
+        store.command(op, ["id": moving, "x": preview.x, "y": preview.y])
       } else {
         selectCanvasTable(moving, tapCount: tapCount)
       }
@@ -1178,9 +1278,12 @@ private struct ERScrollbar: View {
 
       }
       CommandMenu("Model") {
-        Button("Add table") { store?.addTable() }
-          .keyboardShortcut("t", modifiers: [.command, .shift])
-          .disabled(!schemaEditable)
+        Menu("Create") {
+          Button("Table") { store?.addTable() }
+            .keyboardShortcut("t", modifiers: [.command, .shift]).disabled(!schemaEditable)
+          Button("Connection") { store?.beginConnection() }.disabled(!schemaEditable || store?.table == nil)
+          Button("View") { store?.addDataView() }.disabled(store?.editable != true)
+        }
       }
     }
   }

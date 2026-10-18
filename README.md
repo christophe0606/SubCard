@@ -32,8 +32,16 @@ Fields support a custom CHECK expression, and tables support multiple named CHEC
 constraints, with syntax validation before acceptance and a circled-cross delete control.
 Blobs can represent
 images (such as contact photos), videos, sounds or documents. Fields appear only
-in the inspector: the canvas represents tables and relationships. Full card/data
+in the inspector: the canvas represents tables, relationships and views. Full card/data
 entry, attachment import/playback and scripting remain future work.
+
+The canvas **Create** menu adds tables, connections and **views**. A view selects
+a source table and presents selected/ignored column labels, with datatype-aware
+aggregate menus defaulting to **None**. Keys stay hidden; generated SQL includes
+row identity only for ordinary projections. View definitions persist with
+undo/redo and remain editable after table schema locking. Desktop uses the
+inspector; iPhone opens a separate View page. Filters, ordering and displaying or
+editing view results remain future work.
 
 Each document separates application-owned system tables from its user-defined
 entity/relationship schema. User data has one global state across **all user
@@ -99,6 +107,8 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 
 ## Documentation
 
+- [View column builder, aggregate choices and generated SQL](documentation/features/views.md)
+- [Editable query results: conservative analysis and future implementation reference](documentation/features/editable-query-results.md)
 - [Typed fields, indexes, exact decimals and blob purposes](documentation/features/typed-fields.md)
 - [Field and named table CHECK constraints](documentation/features/check-constraints.md)
 - [Entity relationship canvas, command architecture, design decisions, and tests](documentation/features/entity-relationship-canvas.md)

@@ -476,6 +476,105 @@ void custom_checks(const std::filesystem::path &directory) {
     assert(subcard_document_validate_check(d.get(), 1, "\"Start time\" > 0")); // Read-only even when locked.
     std::cout << "Custom field/table CHECK syntax, enforcement, quoting, renames, copies, history and locks passed.\n";
 }
+void data_views(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Sales","x":40,"y":40})"); // 1
+    cmd(d, R"({"op":"add_field","table":1,"name":"Region","kind":"string"})"); // 2
+    cmd(d, R"({"op":"add_field","table":1,"name":"Amount","kind":"integer"})"); // 3
+    cmd(d, R"({"op":"add_field","table":1,"name":"Exact price","kind":"decimal"})"); // 4
+    cmd(d, R"({"op":"add_field","table":1,"name":"Photo","kind":"blob"})"); // 5
+    cmd(d, R"({"op":"add_index","table":1,"name":"Legacy key","kind":"index"})"); // 6
+    cmd(d, R"({"op":"add_data_view","name":"Sales view","table":1,"x":420,"y":40})"); // 7
+    assert(graph(d).find("\"version\":6") != std::string::npos);
+    const auto file = (directory / "data-views.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), file.c_str())); };
+    save();
+    assert(scalar(file, "SELECT json_array_length(json,'$.views[0].columns') FROM subcard_system_er_model") == "4");
+    assert(scalar(file, "SELECT count(*) FROM sqlite_schema WHERE type='view'") == "0");
+    assert(graph(d).find("id AS \\\"__subcard_row_id\\\"") != std::string::npos);
+    assert(graph(d).find("\"groups\":[\"none\",\"count\",\"sum\",\"avg\",\"min\",\"max\"]") != std::string::npos);
+    fail(d, R"({"op":"set_view_column","id":7,"field":6,"included":true})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":0,"included":true})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":3,"included":"yes"})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":4,"included":true,"group":"sum"})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":2,"included":true,"group":"one"})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":2,"included":true,"group":"sum"})");
+    fail(d, R"({"op":"set_view_column","id":7,"field":3,"included":true,"group":"sum"})"); // blob selected
+    cmd(d, R"({"op":"set_view_column","id":7,"field":5,"included":false})");
+    cmd(d, R"({"op":"set_view_column","id":7,"field":4,"included":false})");
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":true,"group":"sum"})");
+    assert(graph(d).find("\"sql\":\"SELECT f2, sum(f3) AS f3_sum FROM user_t1 GROUP BY f2\"") != std::string::npos);
+    assert(graph(d).find("__subcard_row_id") == std::string::npos);
+    cmd(d, R"({"op":"undo"})");
+    assert(graph(d).find("__subcard_row_id") != std::string::npos);
+    cmd(d, R"({"op":"redo"})");
+    write(d, "INSERT INTO user_t1(f2,f3) VALUES('West',10),('West',20),('East',5),('East',NULL)");
+    save();
+    assert(scalar(file, "SELECT sum(f3) FROM user_t1 WHERE f2='West' GROUP BY f2") == "30");
+    // Prepare and run the exact generated SQL from the API, not a second compiler.
+    sqlite3 *parse = nullptr; assert(sqlite3_open(":memory:", &parse) == SQLITE_OK);
+    sqlite3_stmt *extract = nullptr;
+    assert(sqlite3_prepare_v2(parse, "SELECT json_extract(?1,'$.views[0].sql')", -1, &extract, nullptr) == SQLITE_OK);
+    const auto live = graph(d);
+    assert(sqlite3_bind_text(extract, 1, live.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK);
+    assert(sqlite3_step(extract) == SQLITE_ROW);
+    const std::string generated = reinterpret_cast<const char *>(sqlite3_column_text(extract, 0));
+    sqlite3_finalize(extract); sqlite3_close(parse);
+    assert(scalar(file, ("SELECT f3_sum FROM (" + generated + ") WHERE f2='West'").c_str()) == "30");
+    // View metadata never replaces tables or discards fake rows.
+    cmd(d, R"({"op":"update_data_view","id":7,"name":"Totals"})");
+    save(); assert(scalar(file, "SELECT count(*) FROM user_t1") == "4");
+    auto reopened = own(subcard_document_open(file.c_str()));
+    assert(graph(reopened).find(generated) != std::string::npos);
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":true})"); // omitted group resets None
+    assert(graph(d).find("__subcard_row_id") != std::string::npos);
+    cmd(d, R"({"op":"set_view_column","id":7,"field":2,"included":false})");
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":true,"group":"count"})");
+    assert(graph(d).find("SELECT count(f3) AS f3_count FROM user_t1") != std::string::npos);
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":false})");
+    assert(graph(d).find("\"sql\":\"\"") != std::string::npos); // incomplete draft, never key-only SQL
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":true})");
+    assert(graph(d).find("\"field\":3,\"group\":\"none\"") != std::string::npos);
+    cmd(d, R"({"op":"move_data_view","id":7,"x":450,"y":200})");
+    fail(d, R"({"op":"move_data_view","id":7,"x":-1,"y":200})");
+    fail(d, R"({"op":"update_data_view","id":7,"table":999})");
+    cmd(d, R"({"op":"update_data_view","id":7,"table":0})");
+    assert(graph(d).find("\"availableColumns\":[]") != std::string::npos);
+    cmd(d, R"({"op":"update_data_view","id":7,"table":1})");
+    assert(subcard_document_discard_fake_data(d.get()));
+    cmd(d, R"({"op":"delete_field","table":1,"id":3})");
+    save(); assert(scalar(file, "SELECT count(*) FROM json_each((SELECT json FROM subcard_system_er_model),'$.views[0].columns') WHERE json_extract(value,'$.field')=3") == "0");
+    cmd(d, R"({"op":"undo"})");
+    cmd(d, R"({"op":"delete_table","id":1})");
+    assert(graph(d).find("\"views\"") == std::string::npos);
+    cmd(d, R"({"op":"undo"})");
+    assert(graph(d).find("\"version\":6") != std::string::npos);
+    write(d, "INSERT INTO user_t1(f2,f3) VALUES('Real',10)", SUBCARD_DATA_REAL);
+    cmd(d, R"({"op":"update_data_view","id":7,"name":"Real totals"})");
+    cmd(d, R"({"op":"set_view_column","id":7,"field":5,"included":false})");
+    cmd(d, R"({"op":"set_view_column","id":7,"field":3,"included":true,"group":"sum"})");
+    cmd(d, R"({"op":"add_data_view","name":"Another view","table":1,"x":40,"y":300})");
+    fail(d, R"({"op":"add_data_view","name":"Another view","table":1,"x":40,"y":300})");
+    cmd(d, R"({"op":"delete_data_view","id":7})");
+    cmd(d, R"({"op":"undo"})");
+    save(); assert(scalar(file, "SELECT count(*) FROM user_t1") == "1");
+    assert(subcard_document_schema_is_locked(d.get()));
+    assert(subcard_document_set_mode(d.get(), SUBCARD_MODE_USE));
+    fail(d, R"({"op":"update_data_view","id":7,"name":"Forbidden"})");
+    // Final fixture is a useful GUI sample; opening it does not mutate it.
+    auto empty = own(subcard_document_new());
+    cmd(empty, R"({"op":"add_data_view","name":"Choose source later","table":0,"x":20,"y":20})");
+    assert(graph(empty).find("\"columns\":[]") != std::string::npos);
+    // Invalid persisted aggregate metadata must fail closed when reopened.
+    sql(file, "UPDATE subcard_system_er_model SET json=json_set(json,'$.views[0].columns[0].group','injected()')");
+    assert(!subcard_document_open(file.c_str()));
+    // Restore from the in-memory valid document for GUI verification.
+    auto snapshot = subcard_document_snapshot(d.get()); assert(snapshot);
+    { std::ofstream out(file, std::ios::binary); out.write(static_cast<const char *>(subcard_snapshot_bytes(snapshot)), subcard_snapshot_size(snapshot)); assert(out.good()); }
+    subcard_snapshot_close(snapshot);
+    std::cout << "View columns, None defaults, typed aggregates, hidden identity, SQL results, drafts, persistence, history and schema-lock isolation passed.\n";
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
@@ -483,6 +582,7 @@ int main(int argc, char **argv) {
     typed_fields(argv[1]);
     field_rules(argv[1]);
     custom_checks(argv[1]);
+    data_views(argv[1]);
     auto file = (std::filesystem::path(argv[1]) / "er.subcard").string();
     std::filesystem::remove(file);
     auto d = own(subcard_document_new());

@@ -10,6 +10,7 @@ enum EditorTests {
     newTableVisibility()
     typedFields()
     customChecks()
+    dataViews()
     tableTapNavigation()
     independentDocuments()
     let document = subcard_document_new()!
@@ -84,6 +85,57 @@ enum EditorTests {
     store.document = nil
     store.commitNames()
     print("Editor name commits, table relationships, cardinality, selection and undo passed.")
+  }
+  static func dataViews() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.canvasSize = CGSize(width: 700, height: 500)
+    store.addTable()
+    store.addField(.integer)
+    let table = store.table!.id
+    let field = store.field!.id
+    store.addDataView()
+    let view = store.dataView!
+    assert(store.table == nil && store.selectedTable == view.id)
+    assert(view.columns.count == 1 && view.columns[0].group == "none")
+    assert(view.availableColumns[0].groups == ["none", "count", "sum", "avg", "min", "max"])
+    assert(view.sql.contains("__subcard_row_id"))
+    store.tableNameDraft = "Totals"
+    store.setViewColumn(field, included: false)
+    assert(store.dataView?.name == "Totals" && !store.hasDraft)
+    assert(store.dataView?.columns.isEmpty == true && store.dataView?.sql == "")
+    store.setViewColumn(field, included: true)
+    assert(store.dataView?.columns[0].group == "none")
+    store.setViewColumn(field, included: true, group: "sum")
+    assert(store.dataView?.grouped == true && store.dataView?.sql.contains("__subcard_row_id") == false)
+    store.command("undo")
+    assert(store.dataView?.grouped == false && store.dataView?.sql.contains("__subcard_row_id") == true)
+    store.selectTableFromCanvas(view.id, tapCount: 1, compact: true)
+    assert(!store.showDetails && store.dataView?.id == view.id)
+    store.selectTableFromCanvas(view.id, tapCount: 2, compact: true)
+    assert(store.showDetails && store.dataView?.id == view.id)
+    store.pendingSource = nil
+    store.beginConnection()
+    assert(store.pendingSource == nil) // Views have no relationship ports.
+    store.select(table: table)
+    store.beginConnection()
+    store.connect(to: view.id)
+    assert(store.graph.edges.isEmpty && store.pendingSource == nil)
+    store.select(table: view.id)
+    assert(subcard_document_write_user_data(document, SUBCARD_DATA_REAL, "INSERT INTO user_t\(table)(f\(field)) VALUES(42)") != 0)
+    store.refresh()
+    assert(store.locked)
+    store.tableNameDraft = "Real totals"
+    store.commitNames()
+    assert(store.dataView?.name == "Real totals" && store.error == nil)
+    store.deleteSelection()
+    assert(store.graph.views.isEmpty && store.graph.tables.count == 1)
+    store.command("undo")
+    assert(store.graph.views.count == 1)
+    store.document = nil
+    print("View selection, column chips, None defaults, SQL identity, compact navigation, drafts and locked-schema metadata edits passed.")
   }
   static func customChecks() {
     let document = subcard_document_new()!

@@ -172,9 +172,63 @@ impl Viewport {
 pub struct Graph {
     pub tables: Vec<Table>,
     pub edges: Vec<Edge>,
+    #[serde(default)]
+    pub views: Vec<DataView>,
     pub view: Viewport,
     pub can_undo: bool,
     pub can_redo: bool,
+}
+#[derive(Clone, Deserialize)]
+pub struct ViewColumn {
+    pub field: i32,
+    pub group: String,
+}
+#[derive(Clone, Deserialize)]
+pub struct ViewAvailableColumn {
+    pub field: i32,
+    pub name: String,
+    pub groups: Vec<String>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataView {
+    pub id: i32,
+    pub name: String,
+    pub table: i32,
+    pub x: f64,
+    pub y: f64,
+    pub columns: Vec<ViewColumn>,
+    pub available_columns: Vec<ViewAvailableColumn>,
+    pub grouped: bool,
+}
+impl DataView {
+    fn node(&self) -> Table {
+        Table {
+            id: self.id,
+            name: format!("▤ {}", self.name),
+            color: "#7651A8".into(),
+            x: self.x,
+            y: self.y,
+            fields: vec![],
+            constraints: vec![],
+        }
+    }
+}
+fn group_title(group: &str) -> &'static str {
+    match group {
+        "count" => "Count",
+        "sum" => "Sum",
+        "avg" => "Average",
+        "min" => "Minimum",
+        "max" => "Maximum",
+        _ => "None",
+    }
+}
+#[derive(Clone, Copy, PartialEq)]
+enum ERMenu {
+    Create,
+    Source(i32),
+    Group(i32, i32),
 }
 #[derive(Clone)]
 enum Drag {
@@ -205,6 +259,7 @@ pub struct ERState {
     field_name: Entity<TextInput>,
     field_baseline: String,
     field_menu: Option<bool>, // true: add; false: change datatype.
+    dropdown: Option<ERMenu>,
     check_editor: Option<CheckTarget>,
     check_name: Entity<TextInput>,
     check_expression: Entity<TextInput>,
@@ -263,6 +318,7 @@ impl ERState {
             field_name,
             field_baseline: String::new(),
             field_menu: None,
+            dropdown: None,
             check_editor: None,
             check_name,
             check_expression,
@@ -306,6 +362,7 @@ impl ERState {
             .tables
             .iter()
             .cloned()
+            .chain(self.graph.views.iter().map(DataView::node))
             .map(|mut t| {
                 if let Some((id, x, y)) = self.preview {
                     if t.id == id {
@@ -331,6 +388,7 @@ impl ERState {
         self.tables()
             .iter()
             .rev()
+            .filter(|t| !self.graph.views.iter().any(|v| v.id == t.id))
             .find(|t| distance(p, port(t, right)) < 12_f64.max(14. / self.scale()))
             .map(|t| t.id)
     }
@@ -617,6 +675,12 @@ impl SubCardView {
             .tables
             .iter()
             .any(|t| Some(t.id) == self.er.selected)
+            && !self
+                .er
+                .graph
+                .views
+                .iter()
+                .any(|v| Some(v.id) == self.er.selected)
         {
             self.er.selected = None;
         }
@@ -676,6 +740,14 @@ impl SubCardView {
             .iter()
             .find(|t| Some(t.id) == self.er.selected)
             .map(|t| t.name.clone())
+            .or_else(|| {
+                self.er
+                    .graph
+                    .views
+                    .iter()
+                    .find(|v| Some(v.id) == self.er.selected)
+                    .map(|v| v.name.clone())
+            })
             .unwrap_or_default();
         self.er.name_baseline = name.clone();
         if self.er.name.read(cx).content.as_ref() != name {
@@ -685,6 +757,23 @@ impl SubCardView {
     pub fn er_commit_names(&mut self, cx: &mut Context<Self>) {
         if !self.er_has_draft(cx) {
             return;
+        }
+        if let Some(v) = self
+            .er
+            .graph
+            .views
+            .iter()
+            .find(|v| Some(v.id) == self.er.selected)
+        {
+            let name = self.er.name.read(cx).content.to_string();
+            if name != self.er.name_baseline {
+                if let Err(e) = self
+                    .document
+                    .er_command(json!({"op":"update_data_view","id":v.id,"name":name}))
+                {
+                    self.error = Some(e);
+                }
+            }
         }
         if let Some(t) = self
             .er
@@ -753,6 +842,7 @@ impl SubCardView {
         self.er.selected_field = None;
         self.er.field_menu = None;
         self.er.check_editor = None;
+        self.er.dropdown = None;
         self.er_load_names(cx);
         w.focus(&self.er.focus);
         cx.notify();
@@ -799,13 +889,21 @@ impl SubCardView {
     fn er_begin_connection(&mut self, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
         if !self.document.schema_locked() && !self.document.using_document() {
-            self.er.pending = self.er.selected;
+            self.er.pending = self
+                .er
+                .selected
+                .filter(|id| self.er.graph.tables.iter().any(|t| t.id == *id));
             self.er.link_preview = None;
             self.er.link_start = None;
             cx.notify();
         }
     }
     fn er_connect(&mut self, target: i32, cx: &mut Context<Self>) {
+        if self.er.graph.views.iter().any(|v| v.id == target) {
+            self.er.pending = None;
+            self.er.link_preview = None;
+            return;
+        }
         let Some(source) = self.er.pending.take() else {
             return;
         };
@@ -861,6 +959,48 @@ impl SubCardView {
             }
         }
     }
+    fn er_add_view(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.er_commit_names(cx);
+        let count = self.er.graph.views.len();
+        let mut n = count + 1;
+        while self
+            .er
+            .graph
+            .views
+            .iter()
+            .any(|v| v.name.to_lowercase() == format!("view {n}"))
+        {
+            n += 1;
+        }
+        let table = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected)
+            .or_else(|| self.er.graph.tables.first())
+            .map(|t| t.id)
+            .unwrap_or(0);
+        self.er_command(
+            json!({"op":"add_data_view","name":format!("View {n}"),"table":table,
+            "x":(self.er.viewport().pan_x+80.).clamp(0.,100000.),
+            "y":(self.er.viewport().pan_y+160.).clamp(0.,100000.)}),
+            cx,
+        );
+        if self.er.graph.views.len() != count + 1 {
+            return;
+        }
+        if let Some(v) = self.er.graph.views.last().cloned() {
+            self.er_select(Some(v.id), None, w, cx);
+            let bounds = self.er.bounds.get();
+            let viewport = self.er.viewport().revealing_table(
+                &v.node(),
+                f64::from(bounds.size.width),
+                f64::from(bounds.size.height),
+            );
+            self.er_view(viewport, cx);
+        }
+    }
     fn er_copy(&mut self, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
         if let Some(t) = self
@@ -903,7 +1043,15 @@ impl SubCardView {
         }
     }
     fn er_delete(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.er.edge {
+        if let Some(v) = self
+            .er
+            .graph
+            .views
+            .iter()
+            .find(|v| Some(v.id) == self.er.selected)
+        {
+            self.er_command(json!({"op":"delete_data_view","id":v.id}), cx);
+        } else if let Some(id) = self.er.edge {
             self.er_command(json!({"op":"delete_connection","id":id}), cx);
         } else if let Some(id) = self.er.selected {
             self.er_command(json!({"op":"delete_table","id":id}), cx);
@@ -911,11 +1059,11 @@ impl SubCardView {
     }
     fn er_fit(&mut self, cx: &mut Context<Self>) {
         let mut v = self.er.graph.view.clone();
-        if self.er.graph.tables.is_empty() {
+        if self.er.tables().is_empty() {
             v = Viewport::default();
         } else {
             let (mut l, mut t, mut r, mut b) = (f64::MAX, f64::MAX, 0_f64, 0_f64);
-            for table in &self.er.graph.tables {
+            for table in &self.er.tables() {
                 l = l.min(table.x);
                 t = t.min(table.y);
                 r = r.max(table.x + 320.);
@@ -979,8 +1127,7 @@ impl SubCardView {
         if let Some(id) = self.er.target(p) {
             let t = self
                 .er
-                .graph
-                .tables
+                .tables()
                 .iter()
                 .find(|t| t.id == id)
                 .unwrap()
@@ -1067,7 +1214,12 @@ impl SubCardView {
     }
     fn er_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
         if let Some((id, x, y)) = self.er.preview.take() {
-            self.er_command(json!({"op":"move_table","id":id,"x":x,"y":y}), cx);
+            let op = if self.er.graph.views.iter().any(|v| v.id == id) {
+                "move_data_view"
+            } else {
+                "move_table"
+            };
+            self.er_command(json!({"op":op,"id":id,"x":x,"y":y}), cx);
         }
         if self.er.pending.is_some() {
             let p = self.er.position(event.position);
@@ -1110,6 +1262,8 @@ impl SubCardView {
         let can_undo = graph.can_undo;
         let can_redo = graph.can_redo;
         let selected = self.er.selected;
+        let selected_table = graph.tables.iter().any(|t| Some(t.id) == selected);
+        let selected_view = graph.views.iter().any(|v| Some(v.id) == selected);
         let selected_edge = self.er.edge;
         let text_focus = self.er.name.focus_handle(cx).is_focused(window)
             || self.er.field_name.focus_handle(cx).is_focused(window);
@@ -1129,12 +1283,20 @@ impl SubCardView {
             .p_2()
             .border_b_1()
             .border_color(rgb(0xd2d9e2))
-            .child(button("+ Table", schema, cx, |s, w, cx| s.er_add(w, cx)))
-            .child(button(
-                "+ Relationship",
-                schema && selected.is_some(),
+            .child(self.er_dropdown(
+                "+ Create ▾".into(),
+                ERMenu::Create,
+                edit,
+                vec![
+                    ("Table".into(), schema, json!({"op":"$table"})),
+                    (
+                        "Connection".into(),
+                        schema && selected_table,
+                        json!({"op":"$connection"}),
+                    ),
+                    ("View".into(), edit, json!({"op":"$view"})),
+                ],
                 cx,
-                |s, _, cx| s.er_begin_connection(cx),
             ))
             .child(button("−", true, cx, |s, _, cx| {
                 let mut v = s.er.viewport();
@@ -1232,10 +1394,10 @@ impl SubCardView {
                     cx.listener(|s, _: &crate::Redo, _, cx| s.er_command(json!({"op":"redo"}), cx)),
                 )
             })
-            .when(!text_focus && selected.is_some(), |d| {
+            .when(!text_focus && selected_table, |d| {
                 d.on_action(cx.listener(|s, _: &crate::Copy, _, cx| s.er_copy(cx)))
             })
-            .when(!text_focus && schema && selected.is_some(), |d| {
+            .when(!text_focus && schema && selected_table, |d| {
                 d.on_action(cx.listener(|s, _: &crate::Cut, _, cx| {
                     s.er_copy(cx);
                     s.er_delete(cx);
@@ -1244,11 +1406,13 @@ impl SubCardView {
             .when(!text_focus && schema && paste_available, |d| {
                 d.on_action(cx.listener(|s, _: &crate::Paste, w, cx| s.er_paste(w, cx)))
             })
-            .when(schema && selected.is_some(), |d| {
+            .when(!text_focus && schema && selected_table, |d| {
                 d.on_action(cx.listener(|s, _: &crate::Duplicate, w, cx| s.er_duplicate(w, cx)))
             })
             .when(
-                !text_focus && schema && (selected.is_some() || selected_edge.is_some()),
+                !text_focus
+                    && edit
+                    && (selected_view || (schema && (selected_table || selected_edge.is_some()))),
                 |d| {
                     d.on_action(
                         cx.listener(|s, _: &crate::text_input::Delete, _, cx| s.er_delete(cx)),
@@ -1294,6 +1458,207 @@ impl SubCardView {
                 MouseButton::Left,
                 cx.listener(|s, _, _, _| s.er.resizing = false),
             )
+    }
+    fn er_dropdown(
+        &self,
+        title: String,
+        key: ERMenu,
+        enabled: bool,
+        entries: Vec<(String, bool, Value)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut control = div()
+            .relative()
+            .child(button(title, enabled, cx, move |s, _, cx| {
+                s.er.dropdown = if s.er.dropdown == Some(key) {
+                    None
+                } else {
+                    Some(key)
+                };
+                cx.notify();
+            }));
+        if self.er.dropdown == Some(key) && enabled {
+            let mut popup = div()
+                .id(SharedString::from(format!(
+                    "dropdown-{:?}",
+                    match key {
+                        ERMenu::Create => (0, 0),
+                        ERMenu::Source(id) => (id, 0),
+                        ERMenu::Group(id, f) => (id, f),
+                    }
+                )))
+                .absolute()
+                .top(px(32.))
+                .when(matches!(key, ERMenu::Group(_, _)), |d| d.right_0())
+                .when(!matches!(key, ERMenu::Group(_, _)), |d| d.left_0())
+                .w(px(190.))
+                .max_h(px(300.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_1()
+                .rounded_md()
+                .bg(white())
+                .border_1()
+                .border_color(rgb(0xc5ccd8))
+                .shadow_md()
+                .occlude()
+                .on_mouse_down_out(cx.listener(move |s, _, _, cx| {
+                    if s.er.dropdown == Some(key) {
+                        s.er.dropdown = None;
+                        cx.notify();
+                    }
+                }));
+            for (title, allowed, command) in entries {
+                popup = popup.child(button(title, allowed, cx, move |s, w, cx| {
+                    s.er.dropdown = None;
+                    match command["op"].as_str() {
+                        Some("$table") => s.er_add(w, cx),
+                        Some("$connection") => s.er_begin_connection(cx),
+                        Some("$view") => s.er_add_view(w, cx),
+                        _ => s.er_command(command.clone(), cx),
+                    }
+                }));
+            }
+            control = control.child(deferred(popup).with_priority(2));
+        }
+        control
+    }
+    fn er_view_properties(
+        &self,
+        view: &DataView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let edit = !self.document.using_document();
+        let id = view.id;
+        let source_title = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| t.id == view.table)
+            .map(|t| t.name.as_str())
+            .unwrap_or("Choose a table");
+        let mut sources = vec![(
+            "Choose a table".into(),
+            true,
+            json!({"op":"update_data_view","id":id,"table":0}),
+        )];
+        for t in &self.er.graph.tables {
+            sources.push((
+                t.name.clone(),
+                true,
+                json!({"op":"update_data_view","id":id,"table":t.id}),
+            ));
+        }
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().font_weight(FontWeight::BOLD).child("View"))
+            .child("View name");
+        panel = if edit {
+            panel.child(self.er.name.clone())
+        } else {
+            panel.child(view.name.clone())
+        };
+        panel = panel.child("Source table").child(self.er_dropdown(
+            format!("{source_title} ▾"),
+            ERMenu::Source(id),
+            edit,
+            sources,
+            cx,
+        ));
+        for included in [true, false] {
+            panel = panel.child(
+                div()
+                    .border_t_1()
+                    .border_color(rgb(0xe2e6ed))
+                    .pt_3()
+                    .font_weight(FontWeight::BOLD)
+                    .child(if included {
+                        "Selected columns"
+                    } else {
+                        "Ignored columns"
+                    }),
+            );
+            let fields: Vec<_> = if included {
+                view.columns
+                    .iter()
+                    .filter_map(|c| view.available_columns.iter().find(|f| f.field == c.field))
+                    .collect()
+            } else {
+                view.available_columns
+                    .iter()
+                    .filter(|f| !view.columns.iter().any(|c| c.field == f.field))
+                    .collect()
+            };
+            if fields.is_empty() {
+                panel = panel.child(div().text_color(rgb(0x64748b)).child(if view.table == 0 {
+                    "Choose a source table first."
+                } else if included {
+                    "Choose columns below to include them in this view."
+                } else {
+                    "All columns are selected."
+                }));
+            }
+            let mut chips = div().flex().flex_wrap().gap_2();
+            for field in fields {
+                let fid = field.field;
+                let current = view
+                    .columns
+                    .iter()
+                    .find(|c| c.field == fid)
+                    .map(|c| c.group.as_str())
+                    .unwrap_or("none");
+                let caption = if current == "none" {
+                    field.name.clone()
+                } else {
+                    format!("{} · {}", field.name, group_title(current))
+                };
+                let mut chip = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0xcbd5e1))
+                    .bg(rgb(if included { 0xe4efff } else { 0xf2f4f7 }));
+                if included {
+                    chip = chip.child(button("⊗", edit, cx, move |s, _, cx| {
+                        s.er_command(json!({"op":"set_view_column","id":id,"field":fid,"included":false}), cx);
+                    })).child(div().max_w(px(150.)).child(caption));
+                    if field.groups.len() > 1 {
+                        let choices = field.groups.iter().map(|group| (
+                            format!("{}{}", if group == current { "✓ " } else { "" }, group_title(group)), true,
+                            json!({"op":"set_view_column","id":id,"field":fid,"included":true,"group":group})
+                        )).collect();
+                        chip = chip.child(self.er_dropdown(
+                            "▾".into(),
+                            ERMenu::Group(id, fid),
+                            edit,
+                            choices,
+                            cx,
+                        ));
+                    }
+                } else {
+                    chip = chip.child(button(caption, edit, cx, move |s, _, cx| {
+                        s.er_command(json!({"op":"set_view_column","id":id,"field":fid,"included":true,"group":"none"}), cx);
+                    }));
+                }
+                chips = chips.child(chip);
+            }
+            panel = panel.child(chips);
+        }
+        if view.grouped {
+            panel = panel.child(div().text_color(rgb(0x64748b)).child(
+                "Columns set to None define the groups. Aggregate columns summarize each group.",
+            ));
+        }
+        panel
     }
     fn er_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let edit = !self.document.using_document();
@@ -1341,6 +1706,14 @@ impl SubCardView {
                 .child(button(if many {"One to many (1:N)"} else {"One to one (1:1)"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":!many,"cascade":false}),cx)))
                 .when(many,|d|d.child(button(if cascade {"Delete source record: cascade"}else{"Delete source record: block"},schema,cx,move|s,_,cx|s.er_command(json!({"op":"update_connection","id":id,"many":true,"cascade":!cascade}),cx))))
                 .child(button("Delete relationship",schema,cx,move|s,_,cx|s.er_command(json!({"op":"delete_connection","id":id}),cx)));
+        } else if let Some(view) = self
+            .er
+            .graph
+            .views
+            .iter()
+            .find(|v| Some(v.id) == self.er.selected)
+        {
+            panel = panel.child(self.er_view_properties(view, cx));
         } else if let Some(t) = self
             .er
             .graph
@@ -1646,7 +2019,7 @@ impl SubCardView {
                 panel = panel.child(self.er_check_editor_panel(schema, cx));
             }
         } else {
-            panel=panel.child("Select a table or relationship arrow to edit its properties.")
+            panel=panel.child("Select a table, view or relationship arrow to edit its properties.")
                 .child("Drag table headers to move. Drag the background or scroll to pan. Ctrl/Command + scroll zooms.");
         }
         panel
@@ -1811,8 +2184,10 @@ fn paint(
                     Default::default(),
                 ));
             };
-            circle(port(t, false), false, w);
-            circle(port(t, true), pending == Some(t.id), w);
+            if !g.views.iter().any(|v| v.id == t.id) {
+                circle(port(t, false), false, w);
+                circle(port(t, true), pending == Some(t.id), w);
+            }
         }
         if let Some(tid) = pending {
             if let (Some(t), Some(p)) = (tables.iter().find(|t| t.id == tid), link) {
@@ -1896,6 +2271,42 @@ fn paint(
 #[cfg(test)]
 mod viewport_tests {
     use super::{Table, Viewport};
+    #[::core::prelude::v1::test]
+    fn data_view_projection_uses_shared_core_and_preserves_hidden_identity() {
+        use crate::document::Document;
+        use serde_json::json;
+        let mut doc = Document::new().unwrap();
+        for command in [
+            json!({"op":"add_table","name":"Sales","x":10,"y":10}),
+            json!({"op":"add_field","table":1,"name":"Amount","kind":"float"}),
+            json!({"op":"add_data_view","name":"Totals","table":1,"x":400,"y":10}),
+        ] {
+            doc.er_command(command).unwrap();
+        }
+        let graph: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert_eq!(graph.views.len(), 1);
+        let view = &graph.views[0];
+        assert_eq!(view.columns[0].group, "none");
+        assert_eq!(view.available_columns[0].name, "Amount");
+        assert_eq!(view.node().id, view.id);
+        assert!(view.node().fields.is_empty());
+        assert!(doc.er_json().unwrap().contains("__subcard_row_id"));
+        doc.er_command(
+            json!({"op":"set_view_column","id":view.id,"field":2,"included":true,"group":"sum"}),
+        )
+        .unwrap();
+        let graph: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert!(graph.views[0].grouped);
+        assert!(!doc.er_json().unwrap().contains("__subcard_row_id"));
+        doc.er_command(json!({"op":"undo"})).unwrap();
+        assert!(doc.er_json().unwrap().contains("__subcard_row_id"));
+        doc.er_command(json!({"op":"set_view_column","id":view.id,"field":2,"included":false}))
+            .unwrap();
+        doc.er_command(json!({"op":"set_view_column","id":view.id,"field":2,"included":true}))
+            .unwrap();
+        let graph: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert_eq!(graph.views[0].columns[0].group, "none");
+    }
     #[::core::prelude::v1::test]
     fn custom_checks_validate_and_round_trip_through_shared_core() {
         use crate::document::Document;

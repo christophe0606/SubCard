@@ -93,6 +93,31 @@ struct ERTable: Codable, Identifiable {
   }
   var height: Double { 64 }
   var dataFields: [ERField] { fields.filter { $0.datatype != nil } }
+  init(view: ERDataView) {
+    id = view.id; name = "▤ " + view.name; color = "#7651A8"
+    x = view.x; y = view.y; fields = []; constraints = []
+  }
+}
+struct ERViewColumn: Codable { var field: Int; var group: String }
+struct ERViewAvailableColumn: Decodable, Identifiable {
+  var field: Int; var name: String; var kind: String; var groups: [String]
+  var id: Int { field }
+}
+struct ERDataView: Decodable, Identifiable {
+  var id: Int; var name: String; var table: Int; var x: Double; var y: Double
+  var columns: [ERViewColumn]
+  var availableColumns: [ERViewAvailableColumn]
+  var sql: String; var grouped: Bool
+}
+func erGroupTitle(_ group: String) -> String {
+  switch group {
+  case "count": return "Count"
+  case "sum": return "Sum"
+  case "avg": return "Average"
+  case "min": return "Minimum"
+  case "max": return "Maximum"
+  default: return "None"
+  }
 }
 struct EREdge: Codable, Identifiable {
   var id: Int
@@ -112,6 +137,19 @@ struct ERGraph: Decodable {
   var view = ERViewport()
   var canUndo = false
   var canRedo = false
+  var views: [ERDataView] = []
+  var nodes: [ERTable] { tables + views.map { ERTable(view: $0) } }
+  init() {}
+  enum CodingKeys: String, CodingKey { case tables, edges, view, canUndo, canRedo, views }
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    tables = try c.decode([ERTable].self, forKey: .tables)
+    edges = try c.decode([EREdge].self, forKey: .edges)
+    view = try c.decode(ERViewport.self, forKey: .view)
+    canUndo = try c.decode(Bool.self, forKey: .canUndo)
+    canRedo = try c.decode(Bool.self, forKey: .canRedo)
+    views = try c.decodeIfPresent([ERDataView].self, forKey: .views) ?? []
+  }
 }
 
 @MainActor
@@ -140,6 +178,7 @@ final class ERStore: ObservableObject {
   var editable: Bool { document.map { subcard_document_mode($0) == SUBCARD_MODE_EDIT } ?? false }
   var locked: Bool { document.map { subcard_document_schema_is_locked($0) != 0 } ?? true }
   var table: ERTable? { graph.tables.first { $0.id == selectedTable } }
+  var dataView: ERDataView? { graph.views.first { $0.id == selectedTable } }
   var field: ERField? { table?.dataFields.first { $0.id == selectedField } }
   var edge: EREdge? { graph.edges.first { $0.id == selectedEdge } }
   func attach(_ pointer: OpaquePointer, changed: @escaping () -> Void) {
@@ -164,7 +203,7 @@ final class ERStore: ObservableObject {
     do {
       graph = try JSONDecoder().decode(ERGraph.self, from: Data(String(cString: json).utf8))
     } catch { self.error = error.localizedDescription }
-    if !graph.tables.contains(where: { $0.id == selectedTable }) { selectedTable = nil }
+    if !graph.nodes.contains(where: { $0.id == selectedTable }) { selectedTable = nil }
     if !graph.edges.contains(where: { $0.id == selectedEdge }) { selectedEdge = nil }
     if !editable || locked || !graph.tables.contains(where: { $0.id == pendingSource }) {
       pendingSource = nil
@@ -174,14 +213,19 @@ final class ERStore: ObservableObject {
       fieldNameDraft = field?.name ?? ""
       fieldNameBaseline = fieldNameDraft
     }
-    if tableNameDraft == tableNameBaseline || table == nil {
-      tableNameDraft = table?.name ?? ""
+    if tableNameDraft == tableNameBaseline || (table == nil && dataView == nil) {
+      tableNameDraft = table?.name ?? dataView?.name ?? ""
       tableNameBaseline = tableNameDraft
     }
   }
   // Drafts belong to the current selection. All model actions and document
   // lifecycle actions flush them before reading or replacing that selection.
   func commitNames() {
+    if let v = dataView, tableNameDraft != tableNameBaseline {
+      execute("update_data_view", ["id": v.id, "name": tableNameDraft])
+      tableNameDraft = dataView?.name ?? ""
+      tableNameBaseline = tableNameDraft
+    }
     if let t = table, tableNameDraft != tableNameBaseline {
       let name = tableNameDraft
       execute("update_table", ["id": t.id, "name": name, "color": t.color])
@@ -250,7 +294,7 @@ final class ERStore: ObservableObject {
     selectedField = nil
     fieldNameDraft = ""
     fieldNameBaseline = ""
-    tableNameDraft = self.table?.name ?? ""
+    tableNameDraft = self.table?.name ?? dataView?.name ?? ""
     tableNameBaseline = tableNameDraft
     #if os(iOS)
       if details && (selectedTable != nil || selectedEdge != nil) { showDetails = true }
@@ -264,10 +308,11 @@ final class ERStore: ObservableObject {
   }
   func beginConnection() {
     commitNames()
-    guard editable, !locked, let selectedTable else { return }
+    guard editable, !locked, let selectedTable, table != nil else { return }
     pendingSource = selectedTable
   }
   func connect(to target: Int) {
+    guard !graph.views.contains(where: { $0.id == target }) else { pendingSource = nil; return }
     guard let source = pendingSource else { return }
     let count = graph.edges.count
     command("add_connection", ["table": source, "target": target])
@@ -299,6 +344,22 @@ final class ERStore: ObservableObject {
       CGRect(x: added.x, y: added.y, width: 320, height: added.height), in: canvasSize)
     view(target)
     animateReveal(from: start, to: graph.view)
+  }
+  func addDataView() {
+    commitNames()
+    let count = graph.views.count
+    var n = count + 1
+    while graph.views.contains(where: { $0.name.lowercased() == "view \(n)" }) { n += 1 }
+    command("add_data_view", ["name": "View \(n)", "table": table?.id ?? graph.tables.first?.id ?? 0,
+      "x": min(100000, max(0, viewport.panX + 80)),
+      "y": min(100000, max(0, viewport.panY + 160))])
+    guard graph.views.count == count + 1, let added = graph.views.last else { return }
+    select(table: added.id)
+    view(viewport.revealing(CGRect(x: added.x, y: added.y, width: 320, height: 64), in: canvasSize))
+  }
+  func setViewColumn(_ field: Int, included: Bool, group: String = "none") {
+    guard let v = dataView else { return }
+    command("set_view_column", ["id": v.id, "field": field, "included": included, "group": group])
   }
   func updateTable(_ t: ERTable, name: String? = nil, color: String? = nil) {
     commitNames()
@@ -370,7 +431,9 @@ final class ERStore: ObservableObject {
     select(table: graph.tables.last?.id, details: false)
   }
   func deleteSelection() {
-    if let selectedEdge {
+    if let v = dataView {
+      command("delete_data_view", ["id": v.id])
+    } else if let selectedEdge {
       command("delete_connection", ["id": selectedEdge])
     } else if let selectedTable {
       command("delete_table", ["id": selectedTable])
