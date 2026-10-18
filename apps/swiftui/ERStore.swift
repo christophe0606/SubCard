@@ -9,10 +9,11 @@ import SwiftUI
 #endif
 
 enum ERDatatype: String, CaseIterable, Identifiable {
-  case string, url, date, time, datetime, decimal, float, integer, boolean, blob
+  case string, url, date, time, datetime, decimal, float, integer, boolean, blob, dropdown
   var id: String { rawValue }
   var title: String {
     switch self {
+    case .dropdown: return "Dropdown (single selection)"
     case .string: return "String"
     case .url: return "URL"
     case .date: return "Date"
@@ -25,7 +26,7 @@ enum ERDatatype: String, CaseIterable, Identifiable {
     case .blob: return "Blob"
     }
   }
-  var indexable: Bool { self != .blob && self != .decimal }
+  var indexable: Bool { self != .blob && self != .decimal && self != .dropdown }
 }
 struct ERField: Codable, Identifiable {
   var id: Int
@@ -72,6 +73,7 @@ struct ERConstraint: Codable, Identifiable {
     displayExpression = try c.decodeIfPresent(String.self, forKey: .displayExpression) ?? expression
   }
 }
+struct ERDropdownValue: Codable, Identifiable { var id: Int; var value: String }
 struct ERTable: Codable, Identifiable {
   var id: Int
   var name: String
@@ -80,7 +82,10 @@ struct ERTable: Codable, Identifiable {
   var y: Double
   var fields: [ERField]
   var constraints: [ERConstraint] = []
-  enum CodingKeys: String, CodingKey { case id, name, color, x, y, fields, constraints }
+  var ownerField: Int = 0
+  var values: [ERDropdownValue] = []
+  var isDropdown: Bool { ownerField != 0 }
+  enum CodingKeys: String, CodingKey { case id, name, color, x, y, fields, constraints, ownerField, values }
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = try c.decode(Int.self, forKey: .id)
@@ -90,6 +95,8 @@ struct ERTable: Codable, Identifiable {
     y = try c.decode(Double.self, forKey: .y)
     fields = try c.decode([ERField].self, forKey: .fields)
     constraints = try c.decodeIfPresent([ERConstraint].self, forKey: .constraints) ?? []
+    ownerField = try c.decodeIfPresent(Int.self, forKey: .ownerField) ?? 0
+    values = try c.decodeIfPresent([ERDropdownValue].self, forKey: .values) ?? []
   }
   var height: Double { 64 }
   var dataFields: [ERField] { fields.filter { $0.datatype != nil } }
@@ -145,6 +152,7 @@ struct EREdge: Codable, Identifiable {
     inverseName = try c.decodeIfPresent(String.self, forKey: .inverseName) ?? ""
   }
   // Older documents store foreign-key direction; present their conceptual direction.
+  var isDropdown: Bool { field == 0 && targetField != 0 }
   var sourceTable: Int { field == 0 ? table : target }
   var destinationTable: Int { field == 0 ? target : table }
 }
@@ -209,6 +217,8 @@ final class ERStore: ObservableObject {
   var editable: Bool { document.map { subcard_document_mode($0) == SUBCARD_MODE_EDIT } ?? false }
   var locked: Bool { document.map { subcard_document_schema_is_locked($0) != 0 } ?? true }
   var table: ERTable? { graph.tables.first { $0.id == selectedTable } }
+  var ordinaryTableSelected: Bool { table != nil && table?.isDropdown == false }
+  var removableSelection: Bool { ordinaryTableSelected || (edge != nil && edge?.isDropdown == false) }
   var dataView: ERDataView? { graph.views.first { $0.id == selectedTable } }
   var field: ERField? { table?.dataFields.first { $0.id == selectedField } }
   var edge: EREdge? { graph.edges.first { $0.id == selectedEdge } }
@@ -357,11 +367,11 @@ final class ERStore: ObservableObject {
   }
   func beginConnection() {
     commitNames()
-    guard editable, !locked, let selectedTable, table != nil else { return }
+    guard editable, !locked, let selectedTable, ordinaryTableSelected else { return }
     pendingSource = selectedTable
   }
   func connect(to target: Int) {
-    guard !graph.views.contains(where: { $0.id == target }) else { pendingSource = nil; return }
+    guard !graph.tables.contains(where: { $0.id == target && $0.isDropdown }), !graph.views.contains(where: { $0.id == target }) else { pendingSource = nil; return }
     guard let source = pendingSource else { return }
     let count = graph.edges.count
     command("add_connection", ["table": source, "target": target])
@@ -435,12 +445,18 @@ final class ERStore: ObservableObject {
     command(
       "update_table", ["id": t.id, "name": name ?? current.name, "color": color ?? current.color])
   }
+  private func dropdownPayload(_ table: ERTable) -> [Any] {
+    graph.tables.filter { child in table.fields.contains { $0.id == child.ownerField } }.compactMap {
+      guard let data = try? JSONEncoder().encode($0) else { return nil }
+      return try? JSONSerialization.jsonObject(with: data)
+    }
+  }
   func copy() { _ = copyToClipboard() }
   private func clipboardText() -> String? {
     commitNames()
-    guard let table, let data = try? JSONEncoder().encode(table),
+    guard let table, !table.isDropdown, let data = try? JSONEncoder().encode(table),
       let obj = try? JSONSerialization.jsonObject(with: data),
-      let payload = try? JSONSerialization.data(withJSONObject: ["subcardTable": 1, "table": obj]),
+      let payload = try? JSONSerialization.data(withJSONObject: ["subcardTable": 1, "table": obj, "dropdownTables": dropdownPayload(table)]),
       let text = String(data: payload, encoding: .utf8)
     else { return nil }
     return text
@@ -487,23 +503,23 @@ final class ERStore: ObservableObject {
       error = "Clipboard does not contain a SubCard table."
       return
     }
-    command("paste_table", ["table": table])
-    select(table: graph.tables.last?.id, details: false)
+    command("paste_table", ["table": table, "dropdownTables": obj["dropdownTables"] ?? []])
+    select(table: graph.tables.last(where: { !$0.isDropdown })?.id, details: false)
   }
   func duplicate() {
     commitNames()
-    guard let table, let data = try? JSONEncoder().encode(table),
+    guard let table, !table.isDropdown, let data = try? JSONEncoder().encode(table),
       let obj = try? JSONSerialization.jsonObject(with: data)
     else { return }
-    command("paste_table", ["table": obj])
-    select(table: graph.tables.last?.id, details: false)
+    command("paste_table", ["table": obj, "dropdownTables": dropdownPayload(table)])
+    select(table: graph.tables.last(where: { !$0.isDropdown })?.id, details: false)
   }
   func deleteSelection() {
     if let v = dataView {
       command("delete_data_view", ["id": v.id])
-    } else if let selectedEdge {
+    } else if let selectedEdge, edge?.isDropdown == false {
       command("delete_connection", ["id": selectedEdge])
-    } else if let selectedTable {
+    } else if let selectedTable, ordinaryTableSelected {
       command("delete_table", ["id": selectedTable])
     }
   }

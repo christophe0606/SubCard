@@ -69,6 +69,108 @@ std::string join_plan(const std::string &file, const char *query = "EXPLAIN QUER
     sqlite3_close(db);
     return plan;
 }
+void dropdown_fields(const std::filesystem::path &directory) {
+    auto d = own(subcard_document_new());
+    cmd(d, R"({"op":"add_table","name":"Products","x":20,"y":20})");
+    cmd(d, R"({"op":"add_field","table":1,"name":"Color","kind":"dropdown"})"); // field2 table3 valued4 edge5
+    assert(graph(d).find("dropdown_1") != std::string::npos);
+    assert(graph(d).find("\"ownerField\":2") != std::string::npos);
+    cmd(d, R"({"op":"add_dropdown_value","table":3,"value":"Red"})"); //6
+    cmd(d, R"({"op":"add_dropdown_value","table":3,"value":"Blue"})"); //7
+    assert(subcard_document_data_kind(d.get()) == SUBCARD_DATA_NONE);
+    assert(!subcard_document_schema_is_locked(d.get()));
+    for (auto command : {
+        R"({"op":"delete_table","id":3})",
+        R"({"op":"delete_connection","id":5})",
+        R"({"op":"update_connection","id":5,"many":false})",
+        R"({"op":"add_connection","table":3,"target":1})",
+        R"({"op":"add_field","table":3,"name":"extra","kind":"string"})",
+        R"({"op":"update_field","table":3,"id":4,"name":"renamed"})",
+        R"({"op":"delete_field","table":3,"id":4})",
+        R"({"op":"add_constraint","table":3,"name":"check","expression":"1"})",
+        R"({"op":"update_table","id":3,"name":"renamed","color":"#258775"})",
+        R"({"op":"move_dropdown_value","table":3,"id":6,"index":2})"
+    }) fail(d, command);
+    const auto path = (directory / "dropdown.subcard").string();
+    auto save = [&] { assert(subcard_document_save(d.get(), path.c_str())); };
+    save();
+    assert(scalar(path, "SELECT count(*) FROM pragma_table_info('user_t3')") == "2");
+    assert(scalar(path, "SELECT [table]||':'||[from]||':'||[to] FROM pragma_foreign_key_list('user_t1')") == "user_t3:f2:id");
+    assert(scalar(path, "SELECT group_concat(value,',') FROM (SELECT value FROM subcard_system_dropdown_values WHERE dropdown_name='dropdown_1' ORDER BY position)") == "Red,Blue");
+    assert(scalar(path, "SELECT f4 FROM user_t3 WHERE id=6") == "Red");
+    assert(join_plan(path, "EXPLAIN QUERY PLAN SELECT id FROM user_t1 WHERE f2=6").find("user_i2") != std::string::npos);
+    assert(join_plan(path, "EXPLAIN QUERY PLAN SELECT value FROM subcard_system_dropdown_values WHERE dropdown_name='dropdown_1' ORDER BY position").find("subcard_system_dropdown_name") != std::string::npos);
+    assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_REAL, "UPDATE user_t3 SET f4='bad' WHERE id=6"));
+    assert(!subcard_document_schema_is_locked(d.get()));
+    write(d, "INSERT INTO user_t1(f2) VALUES(6),(6),(7),(NULL)");
+    assert(!subcard_document_write_user_data(d.get(), SUBCARD_DATA_FAKE, "INSERT INTO user_t1(f2) VALUES(999)"));
+    // Edit/reorder defaults with fake references without relabeling user data or locking.
+    cmd(d, R"({"op":"update_dropdown_value","table":3,"id":6,"value":"Rouge é'\n"})");
+    cmd(d, R"({"op":"move_dropdown_value","table":3,"id":7,"index":0})");
+    cmd(d, R"({"op":"undo"})"); cmd(d, R"({"op":"redo"})");
+    fail(d, R"({"op":"delete_dropdown_value","table":3,"id":6})"); // referenced
+    save();
+    auto reopened = own(subcard_document_open(path.c_str()));
+    assert(subcard_document_data_kind(reopened.get()) == SUBCARD_DATA_FAKE);
+    assert(!subcard_document_schema_is_locked(reopened.get()));
+    assert(subcard_document_discard_fake_data(d.get()));
+    assert(subcard_document_data_kind(d.get()) == SUBCARD_DATA_NONE);
+    cmd(d, R"({"op":"add_field","table":1,"name":"Name","kind":"string"})"); //8
+    save();
+    assert(scalar(path, "SELECT f4 FROM user_t3 WHERE id=7") == "Blue");
+    assert(scalar(path, "SELECT count(*) FROM user_t1") == "0");
+    cmd(d, R"({"op":"delete_dropdown_value","table":3,"id":6})");
+    cmd(d, R"({"op":"undo"})");
+    save();
+    assert(scalar(path, "SELECT count(*) FROM user_t3") == "2");
+    // Copy templates get fresh IDs and managed relationships, with independent lists.
+    sqlite3* db = nullptr; assert(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt* q = nullptr;
+    assert(sqlite3_prepare_v2(db, "SELECT json_object('op','paste_table','table',json_extract(json,'$.tables[0]'),'dropdownTables',json_array(json_extract(json,'$.tables[1]'))) FROM subcard_system_er_model", -1, &q, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(q) == SQLITE_ROW);
+    std::string paste(reinterpret_cast<const char*>(sqlite3_column_text(q, 0)));
+    sqlite3_finalize(q); sqlite3_close(db);
+    cmd(d, paste); save();
+    assert(scalar(path, "SELECT count(*) FROM subcard_system_dropdown_tables") == "2");
+    assert(scalar(path, "SELECT count(*) FROM subcard_system_dropdown_values") == "4");
+    assert(graph(d).find("dropdown_2") != std::string::npos);
+    cmd(d, R"({"op":"undo"})");
+    cmd(d, R"({"op":"delete_field","table":1,"id":2})"); save();
+    assert(scalar(path, "SELECT count(*) FROM subcard_system_dropdown_tables") == "0");
+    assert(scalar(path, "SELECT count(*) FROM sqlite_schema WHERE name='user_t3'") == "0");
+    cmd(d, R"({"op":"undo"})"); save();
+    assert(scalar(path, "SELECT count(*) FROM user_t3") == "2");
+    cmd(d, R"({"op":"update_field","table":1,"id":2,"kind":"string"})");
+    assert(graph(d).find("ownerField") == std::string::npos);
+    cmd(d, R"({"op":"undo"})");
+    assert(subcard_document_set_mode(d.get(), SUBCARD_MODE_USE));
+    fail(d, R"({"op":"add_dropdown_value","table":3,"value":"Green"})");
+    write(d, "INSERT INTO user_t1(f2) VALUES(6)", SUBCARD_DATA_REAL);
+    assert(subcard_document_set_mode(d.get(), SUBCARD_MODE_EDIT));
+    fail(d, R"({"op":"add_dropdown_value","table":3,"value":"Green"})");
+    cmd(d, R"({"op":"move_table","id":3,"x":420,"y":200})"); save();
+    auto real = own(subcard_document_open(path.c_str()));
+    assert(subcard_document_schema_is_locked(real.get()));
+    // Corrupt defaults cannot silently recreate a different dropdown on reopen.
+    sql(path, "UPDATE subcard_system_dropdown_values SET value='corrupt' WHERE id=6");
+    assert(!subcard_document_open(path.c_str()));
+    auto parent = own(subcard_document_new());
+    cmd(parent, R"({"op":"add_table","name":"Parent","x":0,"y":0})");
+    cmd(parent, R"({"op":"add_field","table":1,"name":"Choice","kind":"dropdown"})");
+    cmd(parent, R"({"op":"delete_table","id":1})");
+    assert(graph(parent).find("\"tables\":[]") != std::string::npos);
+    const auto emptyPath = (directory / "dropdown-empty.subcard").string();
+    assert(subcard_document_save(parent.get(), emptyPath.c_str()));
+    auto empty = own(subcard_document_open(emptyPath.c_str()));
+    cmd(empty, R"({"op":"add_table","name":"Next","x":20,"y":20})");
+    cmd(empty, R"({"op":"add_field","table":1,"name":"One","kind":"dropdown"})");
+    assert(graph(empty).find("dropdown_2") != std::string::npos);
+    cmd(empty, R"({"op":"add_field","table":1,"name":"Two","kind":"dropdown"})");
+    assert(graph(empty).find("dropdown_3") != std::string::npos);
+    assert(subcard_document_save(empty.get(), emptyPath.c_str()));
+    assert(scalar(emptyPath, "SELECT count(*) FROM (SELECT json_extract(value,'$.x') x,json_extract(value,'$.y') y FROM subcard_system_er_model,json_each(subcard_system_er_model.json,'$.tables') WHERE json_extract(value,'$.ownerField')>0 GROUP BY x,y)") == "2");
+    std::cout << "Dropdown ownership, defaults, references, resets, history, copies, locks and persistence passed.\n";
+}
 // User-facing arrows point A -> B; only the backend knows about B's indexed key.
 void table_relationships(const std::filesystem::path &directory) {
     auto d = own(subcard_document_new());
@@ -629,6 +731,7 @@ void data_views(const std::filesystem::path &directory) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     std::filesystem::create_directories(argv[1]);
+    dropdown_fields(argv[1]);
     table_relationships(argv[1]);
     relationship_names(argv[1]);
     typed_fields(argv[1]);

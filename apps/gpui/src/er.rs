@@ -16,7 +16,8 @@ fn default_nullable() -> bool {
     true
 }
 
-const DATATYPES: [(&str, &str); 10] = [
+const DATATYPES: [(&str, &str); 11] = [
+    ("dropdown", "Dropdown (single selection)"),
     ("string", "String"),
     ("url", "URL"),
     ("date", "Date"),
@@ -66,7 +67,7 @@ impl Field {
             .unwrap_or(&self.kind)
     }
     fn indexable(&self) -> bool {
-        self.ordinary() && self.kind != "blob" && self.kind != "decimal"
+        self.ordinary() && self.kind != "blob" && self.kind != "decimal" && self.kind != "dropdown"
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,6 +79,11 @@ pub struct Constraint {
     pub display_expression: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub struct DropdownValue {
+    pub id: i32,
+    pub value: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Table {
     pub id: i32,
     pub name: String,
@@ -87,6 +93,10 @@ pub struct Table {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,
+    #[serde(default, rename = "ownerField")]
+    pub owner_field: i32,
+    #[serde(default)]
+    pub values: Vec<DropdownValue>,
 }
 impl Table {
     fn height(&self) -> f64 {
@@ -99,6 +109,8 @@ pub struct Edge {
     pub table: i32,
     pub field: i32,
     pub target: i32,
+    #[serde(default, rename = "targetField")]
+    pub target_field: i32,
     pub many: bool,
     pub cascade: bool,
     #[serde(default, rename = "referenceName")]
@@ -215,6 +227,8 @@ impl DataView {
             y: self.y,
             fields: vec![],
             constraints: vec![],
+            owner_field: 0,
+            values: vec![],
         }
     }
 }
@@ -271,6 +285,8 @@ pub struct ERState {
     check_editor: Option<CheckTarget>,
     check_name: Entity<TextInput>,
     check_expression: Entity<TextInput>,
+    dropdown_value: Entity<TextInput>,
+    dropdown_edit: Option<(i32, i32)>,
     _subscriptions: Vec<Subscription>,
     pending: Option<i32>,
     link_start: Option<(f64, f64)>,
@@ -297,6 +313,14 @@ impl ERState {
             cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Constraint name"));
         let check_expression =
             cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("CHECK expression"));
+        let dropdown_value =
+            cx.new(|cx| TextInput::new(String::new(), cx).with_placeholder("Text value"));
+        subscriptions.push(cx.observe(&dropdown_value, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.subscribe_in(
+            &dropdown_value,
+            window,
+            |s, _, _: &crate::text_input::Submitted, w, cx| s.er_apply_dropdown(w, cx),
+        ));
         for input in [&check_name, &check_expression] {
             subscriptions.push(cx.observe(input, |_, _, cx| cx.notify()));
             subscriptions.push(cx.subscribe_in(
@@ -340,6 +364,8 @@ impl ERState {
             check_editor: None,
             check_name,
             check_expression,
+            dropdown_value,
+            dropdown_edit: None,
             pending: None,
             link_start: None,
             drag: None,
@@ -407,7 +433,7 @@ impl ERState {
         self.tables()
             .iter()
             .rev()
-            .filter(|t| !self.graph.views.iter().any(|v| v.id == t.id))
+            .filter(|t| t.owner_field == 0 && !self.graph.views.iter().any(|v| v.id == t.id))
             .find(|t| distance(p, port(t, right)) < 12_f64.max(14. / self.scale()))
             .map(|t| t.id)
     }
@@ -954,6 +980,7 @@ impl SubCardView {
         cx: &mut Context<Self>,
     ) {
         self.er_commit_names(cx);
+        self.er.dropdown_edit = None;
         self.er.selected = table;
         self.er.edge = edge;
         self.er.selected_field = None;
@@ -1006,10 +1033,13 @@ impl SubCardView {
     fn er_begin_connection(&mut self, cx: &mut Context<Self>) {
         self.er_commit_names(cx);
         if !self.document.schema_locked() && !self.document.using_document() {
-            self.er.pending = self
-                .er
-                .selected
-                .filter(|id| self.er.graph.tables.iter().any(|t| t.id == *id));
+            self.er.pending = self.er.selected.filter(|id| {
+                self.er
+                    .graph
+                    .tables
+                    .iter()
+                    .any(|t| t.id == *id && t.owner_field == 0)
+            });
             self.er.link_preview = None;
             self.er.link_start = None;
             cx.notify();
@@ -1125,10 +1155,10 @@ impl SubCardView {
             .graph
             .tables
             .iter()
-            .find(|t| Some(t.id) == self.er.selected)
+            .find(|t| Some(t.id) == self.er.selected && t.owner_field == 0)
         {
             cx.write_to_clipboard(ClipboardItem::new_string(
-                json!({"subcardTable":1,"table":t}).to_string(),
+                json!({"subcardTable":1,"table":t,"dropdownTables":self.er.graph.tables.iter().filter(|d|t.fields.iter().any(|f|f.id==d.owner_field)).collect::<Vec<_>>()}).to_string(),
             ));
         }
     }
@@ -1138,8 +1168,19 @@ impl SubCardView {
             .and_then(|c| c.text())
             .and_then(|s| serde_json::from_str::<Value>(&s).ok());
         if let Some(v) = value.filter(|v| v["subcardTable"] == 1) {
-            self.er_command(json!({"op":"paste_table","table":v["table"]}), cx);
-            self.er_select(self.er.graph.tables.last().map(|t| t.id), None, w, cx);
+            self.er_command(json!({"op":"paste_table","table":v["table"],"dropdownTables":v.get("dropdownTables").cloned().unwrap_or(json!([]))}), cx);
+            self.er_select(
+                self.er
+                    .graph
+                    .tables
+                    .iter()
+                    .rev()
+                    .find(|t| t.owner_field == 0)
+                    .map(|t| t.id),
+                None,
+                w,
+                cx,
+            );
         } else {
             self.error = Some("Clipboard does not contain a SubCard table.".into());
             cx.notify();
@@ -1152,11 +1193,22 @@ impl SubCardView {
             .graph
             .tables
             .iter()
-            .find(|t| Some(t.id) == self.er.selected)
+            .find(|t| Some(t.id) == self.er.selected && t.owner_field == 0)
             .cloned()
         {
-            self.er_command(json!({"op":"paste_table","table":t}), cx);
-            self.er_select(self.er.graph.tables.last().map(|t| t.id), None, w, cx);
+            self.er_command(json!({"op":"paste_table","table":t,"dropdownTables":self.er.graph.tables.iter().filter(|d|t.fields.iter().any(|f|f.id==d.owner_field)).collect::<Vec<_>>()}), cx);
+            self.er_select(
+                self.er
+                    .graph
+                    .tables
+                    .iter()
+                    .rev()
+                    .find(|t| t.owner_field == 0)
+                    .map(|t| t.id),
+                None,
+                w,
+                cx,
+            );
         }
     }
     fn er_delete(&mut self, cx: &mut Context<Self>) {
@@ -1391,13 +1443,21 @@ impl SubCardView {
         let can_undo = graph.can_undo;
         let can_redo = graph.can_redo;
         let selected = self.er.selected;
-        let selected_table = graph.tables.iter().any(|t| Some(t.id) == selected);
+        let selected_table = graph
+            .tables
+            .iter()
+            .any(|t| Some(t.id) == selected && t.owner_field == 0);
+        let removable_edge = graph
+            .edges
+            .iter()
+            .any(|e| Some(e.id) == self.er.edge && (e.field != 0 || e.target_field == 0));
         let selected_view = graph.views.iter().any(|v| Some(v.id) == selected);
         let selected_edge = self.er.edge;
         let text_focus = self.er.name.focus_handle(cx).is_focused(window)
             || self.er.field_name.focus_handle(cx).is_focused(window)
             || self.er.reference_name.focus_handle(cx).is_focused(window)
-            || self.er.inverse_name.focus_handle(cx).is_focused(window);
+            || self.er.inverse_name.focus_handle(cx).is_focused(window)
+            || self.er.dropdown_value.focus_handle(cx).is_focused(window);
         let paste_available = cx
             .read_from_clipboard()
             .and_then(|c| c.text())
@@ -1545,7 +1605,7 @@ impl SubCardView {
             .when(
                 !text_focus
                     && edit
-                    && (selected_view || (schema && (selected_table || selected_edge.is_some()))),
+                    && (selected_view || (schema && (selected_table || removable_edge))),
                 |d| {
                     d.on_action(
                         cx.listener(|s, _: &crate::text_input::Delete, _, cx| s.er_delete(cx)),
@@ -1793,6 +1853,78 @@ impl SubCardView {
         }
         panel
     }
+    fn er_apply_dropdown(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let Some((table, id)) = self.er.dropdown_edit else {
+            return;
+        };
+        let value = self.er.dropdown_value.read(cx).content.to_string();
+        let command = if id == 0 {
+            json!({"op":"add_dropdown_value","table":table,"value":value})
+        } else {
+            json!({"op":"update_dropdown_value","table":table,"id":id,"value":value})
+        };
+        self.er_command(command, cx);
+        if self.error.is_none() {
+            self.er.dropdown_edit = None;
+            w.focus(&self.er.focus);
+        }
+        cx.notify();
+    }
+    fn er_dropdown_properties(
+        &self,
+        t: &Table,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let enabled = !self.document.using_document() && !self.document.schema_locked();
+        let table = t.id;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().font_weight(FontWeight::BOLD).child(t.name.clone()))
+            .child("Managed dropdown · single selection")
+            .child("Fixed text column: valued. Delete the owning field to remove this table.")
+            .child(div().font_weight(FontWeight::BOLD).child("Default choices"))
+            .child("Design defaults survive fake-data resets and do not lock the schema.");
+        for (index, v) in t.values.iter().enumerate() {
+            let id = v.id;
+            let text = v.value.clone();
+            panel = panel.child(div().id(("dropdown-choice",id as usize)).flex().flex_col().gap_2().border_b_1().pb_2()
+                .child(if text.is_empty() { "(empty text)".to_string() } else { text.clone() })
+                .child(div().flex().flex_wrap().gap_1()
+                    .child(button("Edit", enabled, cx, move |s,w,cx| {
+                        s.er.dropdown_edit = Some((table,id));
+                        s.er.dropdown_value.update(cx, |i,cx|i.set_content(text.clone(),cx));
+                        w.focus(&s.er.dropdown_value.focus_handle(cx)); cx.notify();
+                    }))
+                    .child(button("Delete", enabled, cx, move |s,_,cx|s.er_command(json!({"op":"delete_dropdown_value","table":table,"id":id}),cx)))
+                    .child(button("↑", enabled && index > 0, cx, move |s,_,cx|s.er_command(json!({"op":"move_dropdown_value","table":table,"id":id,"index":index.saturating_sub(1)}),cx)))
+                    .child(button("↓", enabled && index+1<t.values.len(), cx, move |s,_,cx|s.er_command(json!({"op":"move_dropdown_value","table":table,"id":id,"index":index+1}),cx)))));
+        }
+        panel = panel.child(button("Add choice", enabled, cx, move |s, w, cx| {
+            s.er.dropdown_edit = Some((table, 0));
+            s.er.dropdown_value
+                .update(cx, |i, cx| i.set_content(String::new(), cx));
+            w.focus(&s.er.dropdown_value.focus_handle(cx));
+            cx.notify();
+        }));
+        if self.er.dropdown_edit.is_some_and(|(id, _)| id == table) && enabled {
+            panel = panel.child(self.er.dropdown_value.clone()).child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button("Cancel", true, cx, |s, w, cx| {
+                        s.er.dropdown_edit = None;
+                        w.focus(&s.er.focus);
+                        cx.notify();
+                    }))
+                    .child(button("Apply", true, cx, |s, w, cx| {
+                        s.er_apply_dropdown(w, cx)
+                    })),
+            );
+        }
+        panel
+    }
     fn er_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let edit = !self.document.using_document();
         let schema = edit && !self.document.schema_locked();
@@ -1830,6 +1962,12 @@ impl SubCardView {
                 .iter()
                 .find(|t| t.id == e.destination_table())
                 .unwrap();
+            let schema = schema && (e.field != 0 || e.target_field == 0);
+            if e.field == 0 && e.target_field != 0 {
+                panel = panel.child(
+                    "Managed dropdown · delete its owning field to remove this relationship.",
+                );
+            }
             let id = e.id;
             let many = e.many;
             let cascade = e.cascade;
@@ -1853,6 +1991,14 @@ impl SubCardView {
             .find(|v| Some(v.id) == self.er.selected)
         {
             panel = panel.child(self.er_view_properties(view, cx));
+        } else if let Some(t) = self
+            .er
+            .graph
+            .tables
+            .iter()
+            .find(|t| Some(t.id) == self.er.selected && t.owner_field != 0)
+        {
+            panel = panel.child(self.er_dropdown_properties(t, cx));
         } else if let Some(t) = self
             .er
             .graph
@@ -2396,13 +2542,26 @@ fn paint(
                 c,
                 Default::default(),
             ));
+            if t.owner_field != 0 {
+                w.paint_quad(quad(
+                    Bounds::new(
+                        p + point(px((5. * s) as f32), px((5. * s) as f32)),
+                        size(px((310. * s) as f32), px((54. * s) as f32)),
+                    ),
+                    px((5. * s) as f32),
+                    color(&t.color),
+                    px(1.),
+                    rgba(0xffffff99),
+                    Default::default(),
+                ));
+            }
             let clip = Bounds::new(
                 p + point(px((14. * s) as f32), px(0.)),
                 size(px((292. * s) as f32), px((60. * s) as f32)),
             );
             w.with_content_mask(Some(ContentMask { bounds: clip }), |w| {
                 label(
-                    &t.name,
+                    &format!("{}{}", if t.owner_field != 0 { "▾ " } else { "" }, t.name),
                     p + point(px((14. * s) as f32), px((12. * s) as f32)),
                     (72. / 2.54 * s) as f32,
                     white(),
@@ -2425,7 +2584,7 @@ fn paint(
                     Default::default(),
                 ));
             };
-            if !g.views.iter().any(|v| v.id == t.id) {
+            if t.owner_field == 0 && !g.views.iter().any(|v| v.id == t.id) {
                 circle(port(t, false), false, w);
                 circle(port(t, true), pending == Some(t.id), w);
             }
@@ -2602,6 +2761,8 @@ mod viewport_tests {
                 check_display: String::new(),
             }],
             constraints: vec![],
+            owner_field: 0,
+            values: vec![],
         };
         let b = Table {
             id: 2,
@@ -2611,6 +2772,8 @@ mod viewport_tests {
             y: 100.,
             fields: vec![],
             constraints: vec![],
+            owner_field: 0,
+            values: vec![],
         };
         assert_eq!(a.height(), 64.);
         let edge = Edge {
@@ -2618,6 +2781,7 @@ mod viewport_tests {
             table: 1,
             field: 0,
             target: 2,
+            target_field: 0,
             many: true,
             cascade: false,
             reference_name: "Reference".into(),
@@ -2628,6 +2792,7 @@ mod viewport_tests {
             table: 2,
             field: 7,
             target: 1,
+            target_field: 0,
             many: false,
             cascade: false,
             reference_name: "Reference".into(),
@@ -2648,6 +2813,7 @@ mod viewport_tests {
             table: 1,
             field: 0,
             target: 1,
+            target_field: 0,
             many: true,
             cascade: false,
             reference_name: "Reference".into(),
@@ -2728,6 +2894,32 @@ mod viewport_tests {
         }
     }
     #[::core::prelude::v1::test]
+    fn managed_dropdown_metadata_and_history() {
+        use serde_json::json;
+        let mut doc = crate::document::Document::new().unwrap();
+        for command in [
+            json!({"op":"add_table","name":"Products","x":20,"y":20}),
+            json!({"op":"add_field","table":1,"name":"Color","kind":"dropdown"}),
+            json!({"op":"add_dropdown_value","table":3,"value":"Red"}),
+            json!({"op":"add_dropdown_value","table":3,"value":"Blue"}),
+            json!({"op":"move_dropdown_value","table":3,"id":7,"index":0}),
+        ] {
+            doc.er_command(command).unwrap();
+        }
+        let g: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert!(g.tables[0].fields[0].ordinary());
+        assert!(!g.tables[0].fields[0].indexable());
+        assert_eq!(g.tables[1].owner_field, 2);
+        assert_eq!(g.tables[1].values[0].value, "Blue");
+        assert_eq!(g.edges[0].source_table(), 3);
+        assert_eq!(g.edges[0].destination_table(), 1);
+        assert_eq!(g.edges[0].target_field, 2);
+        assert!(doc.er_command(json!({"op":"delete_table","id":3})).is_err());
+        doc.er_command(json!({"op":"undo"})).unwrap();
+        let restored: super::Graph = serde_json::from_str(&doc.er_json().unwrap()).unwrap();
+        assert_eq!(restored.tables[1].values[0].value, "Red");
+    }
+    #[::core::prelude::v1::test]
     fn typed_field_options_round_trip_without_changing_canvas_geometry() {
         let mut table: Table = serde_json::from_value(serde_json::json!({
             "id":1,"name":"People","color":"#397DB8","x":10.,"y":10.,
@@ -2791,6 +2983,8 @@ mod viewport_tests {
                             y,
                             fields: vec![],
                             constraints: vec![],
+                            owner_field: 0,
+                            values: vec![],
                         };
                         let original = Viewport {
                             zoom,
@@ -2830,6 +3024,8 @@ mod viewport_tests {
             y: 60.,
             fields: vec![],
             constraints: vec![],
+            owner_field: 0,
+            values: vec![],
         };
         let camera = Viewport {
             pan_x: 10.,

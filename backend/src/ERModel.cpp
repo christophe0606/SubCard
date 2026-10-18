@@ -122,9 +122,9 @@ bool legacy(const ERField &f) { return f.kind == "index" || f.kind == "secondary
 bool ordinary(const std::string &kind) {
     return kind == "string" || kind == "url" || kind == "date" || kind == "time" ||
            kind == "datetime" || kind == "decimal" || kind == "float" ||
-           kind == "integer" || kind == "boolean" || kind == "blob";
+           kind == "integer" || kind == "boolean" || kind == "blob" || kind == "dropdown";
 }
-bool indexable(const std::string &kind) { return ordinary(kind) && kind != "blob" && kind != "decimal"; }
+bool indexable(const std::string &kind) { return ordinary(kind) && kind != "blob" && kind != "decimal" && kind != "dropdown"; }
 std::vector<std::string> view_groups(const ERField &f) {
     if (f.kind == "blob") return {"none"};
     std::vector<std::string> groups{"none", "count"};
@@ -190,7 +190,7 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
     const bool namedRelationships = std::any_of(g.edges.begin(), g.edges.end(), [](const auto &e) {
         return !e.referenceName.empty() || !e.inverseName.empty();
     });
-    std::string s = std::string("{\"version\":") + (namedRelationships ? "7" : !g.views.empty() ? "6" : checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
+    std::string s = std::string("{\"version\":") + (g.dropdownSequence ? "8" : namedRelationships ? "7" : !g.views.empty() ? "6" : checks ? "5" : rules ? "4" : typed ? "3" : "2") + ",\"tables\":[";
     bool first = true;
     for (const auto &t : g.tables) {
         if (!first)
@@ -226,6 +226,14 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
                      ",\"expression\":" + quote(db, c.expression);
                 if (display) s += ",\"displayExpression\":" + quote(db, rewrite_check(c.expression, check_names(t, true)));
                 s += "}";
+            }
+            s += "]";
+        }
+        if (t.ownerField) {
+            s += ",\"ownerField\":" + num(t.ownerField) + ",\"values\":[";
+            for (size_t i = 0; i < t.values.size(); ++i) {
+                if (i) s += ",";
+                s += "{\"id\":" + num(t.values[i].id) + ",\"value\":" + quote(db, t.values[i].value) + "}";
             }
             s += "]";
         }
@@ -275,10 +283,13 @@ std::string graph_json(sqlite3 *db, const ERGraph &g, bool display = false) {
         }
         s += "]";
     }
+    if (g.dropdownSequence) s += ",\"dropdownSequence\":" + num(g.dropdownSequence);
     return s + "}";
 }
 ERTable table_from(const JSON &j) {
     ERTable t{j.id("id"), j.str("name"), j.str("color"), j.number("x"), j.number("y"), {}, {}};
+    if (!j.type("ownerField").empty()) t.ownerField = j.id("ownerField");
+    if (!j.type("values").empty()) for (auto &v : j.array("values")) t.values.push_back({v.id("id"), v.str("value", 4096)});
     for (auto &f : j.array("fields")) {
         ERField v{f.id("id"), f.str("name"), f.str("kind")};
         v.unique = f.type("unique").empty() ? legacy(v) : f.boolean("unique");
@@ -295,8 +306,9 @@ ERTable table_from(const JSON &j) {
     return t;
 }
 ERGraph graph_from(const JSON &j) {
-    require(j.id("version") >= 1 && j.id("version") <= 7, "Unsupported ER model version.");
+    require(j.id("version") >= 1 && j.id("version") <= 8, "Unsupported ER model version.");
     ERGraph g;
+    if (!j.type("dropdownSequence").empty()) g.dropdownSequence = j.id("dropdownSequence");
     for (auto &t : j.array("tables"))
         g.tables.push_back(table_from(t));
     for (auto &e : j.array("edges")) {
@@ -370,6 +382,19 @@ int validate(ERGraph &g) {
                     std::all_of(t.color.begin() + 1, t.color.end(),
                                 [](unsigned char c) { return std::isxdigit(c); }),
                 "Expected a #RRGGBB color.");
+        require(t.ownerField || t.values.empty(), "Only dropdown tables have default values.");
+        if (t.ownerField) {
+            require(g.dropdownSequence > 0 && t.fields.size() == 1 && t.fields[0].kind == "string" &&
+                    t.fields[0].name == "valued" && !t.fields[0].nullable && !t.fields[0].unique &&
+                    !t.fields[0].indexed && t.fields[0].check.empty() && t.constraints.empty(),
+                    "Dropdown tables have a fixed valued text column.");
+            require(t.values.size() <= 10000, "Too many dropdown values.");
+            for (const auto &v : t.values) {
+                id(v.id);
+                require(valid_utf8(v.value) && v.value.size() <= 4096 && v.value.find('\0') == std::string::npos,
+                        "Dropdown values must be valid text up to 4096 UTF-8 bytes.");
+            }
+        }
         require(t.fields.size() <= 128, "A table supports at most 128 fields.");
         std::set<std::string> fn{"id"};
         for (auto &f : t.fields) {
@@ -403,10 +428,16 @@ int validate(ERGraph &g) {
         if (e.field == 0) {
             table(g, e.table);
             table(g, e.target);
-            require(e.targetField == 0, "Table relationships cannot name a destination key.");
+            if (e.targetField) {
+                require(table(g, e.table).ownerField == e.targetField &&
+                        field(table(g, e.target), e.targetField).kind == "dropdown" && e.many && !e.cascade,
+                        "Dropdown relationships are managed by their owning field.");
+            } else require(!table(g, e.table).ownerField && !table(g, e.target).ownerField,
+                           "Dropdown tables cannot have additional relationships.");
             require(e.many || !e.cascade, "Cascade applies only to one-to-many connections.");
             continue;
         }
+        require(!table(g, e.table).ownerField && !table(g, e.target).ownerField, "Dropdown tables cannot have additional relationships.");
         auto &source = field(table(g, e.table), e.field);
         auto &target = table(g, e.target);
         require(source.kind == "secondary", "Connections must start at a foreign-key field.");
@@ -414,6 +445,15 @@ int validate(ERGraph &g) {
                 "Connections must end at a primary key or a unique index.");
         require(connected.insert(e.field).second, "This foreign-key field already has a connection.");
         require(e.many || !e.cascade, "Cascade applies only to one-to-many connections.");
+    }
+    for (const auto &t : g.tables) {
+        for (const auto &f : t.fields) if (f.kind == "dropdown")
+            require(std::count_if(g.edges.begin(), g.edges.end(), [&](const auto &e) {
+                return e.field == 0 && e.target == t.id && e.targetField == f.id;
+            }) == 1, "Dropdown fields require exactly one managed relationship.");
+        if (t.ownerField) require(std::count_if(g.edges.begin(), g.edges.end(), [&](const auto &e) {
+            return e.field == 0 && e.table == t.id && e.targetField == t.ownerField;
+        }) == 1, "Dropdown table has no owning field.");
     }
     std::set<std::string> viewNames;
     for (const auto &v : g.views) {
@@ -486,6 +526,8 @@ std::string schema(const ERGraph &g) {
             if (!f.nullable) sql += " NOT NULL";
             if ((f.kind == "index" || !legacy(f)) && f.unique)
                 sql += " UNIQUE";
+            if (f.kind == "dropdown") for (const auto &d : g.tables) if (d.ownerField == f.id)
+                sql += " REFERENCES user_t" + num(d.id) + "(id) ON DELETE RESTRICT";
             sql += field_check(f, col);
             if (!f.check.empty()) sql += " CHECK(" + f.check + ")";
             for (const auto &e : g.edges)
@@ -499,7 +541,7 @@ std::string schema(const ERGraph &g) {
         }
         // A -> B means A has one/many B. The hidden reference belongs to B.
         for (const auto &e : g.edges)
-            if (e.field == 0 && e.target == t.id) {
+            if (e.field == 0 && e.targetField == 0 && e.target == t.id) {
                 sql += ",r" + num(e.id) + " INTEGER" + (e.many ? "" : " UNIQUE") +
                        " REFERENCES user_t" + num(e.table) + "(id) ON DELETE " +
                        (e.cascade ? "CASCADE" : "RESTRICT");
@@ -508,16 +550,62 @@ std::string schema(const ERGraph &g) {
             sql += ",CONSTRAINT " + sql_identifier(c.name) + " CHECK(" + c.expression + ")";
         sql += ") STRICT;";
         for (const auto &e : g.edges)
-            if (e.field == 0 && e.target == t.id && e.many)
+            if (e.field == 0 && e.targetField == 0 && e.target == t.id && e.many)
                 sql += "CREATE INDEX user_r" + num(e.id) + " ON user_t" + num(t.id) +
                        "(r" + num(e.id) + ");";
         for (const auto &f : t.fields)
-            if (f.kind == "secondary" || (f.kind == "index" && !f.unique) ||
+            if (f.kind == "secondary" || (f.kind == "index" && !f.unique) || (f.kind == "dropdown" && !f.unique) ||
                 (!legacy(f) && f.indexed && !f.unique))
                 sql += "CREATE INDEX user_i" + std::to_string(f.id) + " ON user_t" + std::to_string(t.id) +
                        "(f" + std::to_string(f.id) + ");";
     }
     return sql;
+}
+void create_dropdown(ERGraph &g, int tableID, int fieldID, int &next, const std::vector<ERDropdownValue> &values = {}) {
+    const auto owner = table(g, tableID);
+    std::string label;
+    do { label = "dropdown_" + num(++g.dropdownSequence); }
+    while (std::any_of(g.tables.begin(), g.tables.end(), [&](const auto &t) { return lower(t.name) == label; }));
+    ERTable t{next++, label, "#258775", std::min(100000., owner.x + 380), owner.y, {}, {}};
+    auto occupied = [&] {
+        auto overlaps = [&](double x, double y) { return t.x < x + 320 && x < t.x + 320 && t.y < y + 64 && y < t.y + 64; };
+        for (const auto &other : g.tables) if (overlaps(other.x, other.y)) return true;
+        for (const auto &other : g.views) if (overlaps(other.x, other.y)) return true;
+        return false;
+    };
+    while (occupied()) {
+        t.y += 144;
+        if (t.y > 100000) { t.y = 0; t.x = t.x > 99620 ? 0 : t.x + 380; }
+    }
+    t.ownerField = fieldID;
+    ERField f{next++, "valued", "string", false}; f.nullable = false;
+    t.fields.push_back(f);
+    for (const auto &v : values) t.values.push_back({next++, v.value});
+    g.edges.push_back({next++, t.id, 0, tableID, fieldID, true, false, field(table(g, tableID), fieldID).name, ""});
+    g.tables.push_back(t);
+}
+void remove_orphan_dropdowns(ERGraph &g) {
+    std::set<int> removed;
+    for (const auto &t : g.tables) if (t.ownerField) {
+        bool found = false;
+        for (const auto &owner : g.tables) for (const auto &f : owner.fields)
+            if (f.id == t.ownerField && f.kind == "dropdown") found = true;
+        if (!found) removed.insert(t.id);
+    }
+    g.tables.erase(std::remove_if(g.tables.begin(), g.tables.end(), [&](const auto &t) { return removed.count(t.id); }), g.tables.end());
+    g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(), [&](const auto &e) { return removed.count(e.table) || removed.count(e.target); }), g.edges.end());
+    g.views.erase(std::remove_if(g.views.begin(), g.views.end(), [&](const auto &v) { return removed.count(v.table); }), g.views.end());
+}
+void store_dropdowns(sqlite3 *db, const ERGraph &g) {
+    exec(db, "DELETE FROM subcard_system_dropdown_values; DELETE FROM subcard_system_dropdown_tables;");
+    for (const auto &t : g.tables) if (t.ownerField) {
+        Query registry(db, "INSERT INTO subcard_system_dropdown_tables VALUES(" + num(t.id) + ",?1," + num(t.fields[0].id) + ")");
+        registry.bind(1, t.name); registry.step();
+        for (size_t i = 0; i < t.values.size(); ++i) {
+            Query value(db, "INSERT INTO subcard_system_dropdown_values VALUES(" + num(t.values[i].id) + "," + num(t.id) + ",?1,?2," + num(static_cast<int>(i)) + ")");
+            value.bind(1, t.name); value.bind(2, t.values[i].value); value.step();
+        }
+    }
 }
 void store(sqlite3 *db, const char *tableName, const std::string &json) {
     Query q(db, std::string("UPDATE ") + tableName + " SET json=?1 WHERE id=1");
@@ -551,6 +639,28 @@ void initialize_er(sqlite3 *db, ERModel &m) {
     require(q.step(), "Missing ER model.");
     m.graph = graph_from(JSON(db, q.text()));
     m.nextID = validate(m.graph) + 1;
+    int dropdownCount = 0, valueCount = 0;
+    for (const auto &t : m.graph.tables) if (t.ownerField) {
+        ++dropdownCount;
+        Query registry(db, "SELECT name,value_field FROM subcard_system_dropdown_tables WHERE id=" + num(t.id));
+        require(registry.step() && registry.text() == t.name && sqlite3_column_int(registry.p, 1) == t.fields[0].id,
+                "Dropdown registry does not match its design.");
+        Query defaults(db, "SELECT id,value,position,dropdown_name FROM subcard_system_dropdown_values WHERE table_id=" + num(t.id) + " ORDER BY position");
+        for (size_t i = 0; i < t.values.size(); ++i) {
+            ++valueCount;
+            require(defaults.step() && sqlite3_column_int(defaults.p, 0) == t.values[i].id && defaults.text(1) == t.values[i].value &&
+                    sqlite3_column_int(defaults.p, 2) == static_cast<int>(i) && defaults.text(3) == t.name,
+                    "Dropdown defaults do not match their design.");
+        }
+        require(!defaults.step(), "Unexpected dropdown default values.");
+        Query rows(db, "SELECT count(*) FROM user_t" + num(t.id) + " WHERE id NOT IN(SELECT id FROM subcard_system_dropdown_values WHERE table_id=" + num(t.id) + ") OR f" + num(t.fields[0].id) + " IS NOT (SELECT value FROM subcard_system_dropdown_values WHERE id=user_t" + num(t.id) + ".id)");
+        require(rows.step() && sqlite3_column_int(rows.p, 0) == 0, "Dropdown rows do not match their defaults.");
+        Query count(db, "SELECT count(*) FROM user_t" + num(t.id));
+        require(count.step() && sqlite3_column_int(count.p, 0) == static_cast<int>(t.values.size()), "Dropdown rows are missing.");
+    }
+    Query counts(db, "SELECT (SELECT count(*) FROM subcard_system_dropdown_tables),(SELECT count(*) FROM subcard_system_dropdown_values)");
+    require(counts.step() && sqlite3_column_int(counts.p, 0) == dropdownCount && sqlite3_column_int(counts.p, 1) == valueCount,
+            "Unexpected dropdown system metadata.");
     if (!m.graph.tables.empty()) {
         const auto expected = schema(m.graph);
         Query actual(db, "SELECT sql FROM sqlite_schema WHERE substr(name,1,5)='user_' AND sql IS NOT NULL");
@@ -620,6 +730,9 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
     auto g = m.graph;
     int next = m.nextID;
     bool changesSchema = true;
+    if (!history && !j.type("table").empty() && j.type("table") == "integer" &&
+        (op.find("field") != std::string::npos || op.find("index") != std::string::npos || op.find("constraint") != std::string::npos))
+        require(!table(g, j.id("table")).ownerField, "Dropdown columns are fixed; edit the default values instead.");
     if (history) {
         auto &list = undo ? m.undo : m.redo;
         require(!list.empty(), "No action to undo or redo.");
@@ -661,6 +774,8 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         g.tables.push_back({next++, j.str("name"), "#397DB8", j.number("x"), j.number("y"), {}, {}});
     } else if (op == "paste_table") {
         auto t = table_from(j.object("table"));
+        require(!t.ownerField, "Duplicate the owning table to copy a dropdown.");
+        const auto originals = t.fields;
         t.id = next++;
         // Reserve room for a unique copy suffix without splitting UTF-8.
         if (t.name.size() > 112) {
@@ -688,9 +803,18 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
             c.expression = rewrite_check(c.expression, remap);
         }
         g.tables.push_back(t);
+        for (size_t i = 0; i < t.fields.size(); ++i) if (t.fields[i].kind == "dropdown") {
+            std::vector<ERDropdownValue> values;
+            if (!j.type("dropdownTables").empty()) for (const auto &d : j.array("dropdownTables")) {
+                auto source = table_from(d);
+                if (source.ownerField == originals[i].id) values = source.values;
+            }
+            create_dropdown(g, t.id, t.fields[i].id, next, values);
+        }
     } else if (op == "update_table") {
         auto &t = table(g, j.id("id"));
         auto n = j.str("name");
+        require(!t.ownerField || n == t.name, "Dropdown table names are managed automatically.");
         changesSchema = false;
         t.name = n;
         t.color = j.str("color");
@@ -701,7 +825,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         changesSchema = false;
     } else if (op == "delete_table") {
         int id = j.id("id");
-        table(g, id);
+        require(!table(g, id).ownerField, "Delete the owning field to remove its dropdown table.");
         g.tables.erase(
             std::remove_if(g.tables.begin(), g.tables.end(), [&](const auto &t) { return t.id == id; }),
             g.tables.end());
@@ -709,6 +833,22 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
                                      [&](auto &e) { return e.table == id || e.target == id; }),
                       g.edges.end());
         g.views.erase(std::remove_if(g.views.begin(), g.views.end(), [&](const auto &v) { return v.table == id; }), g.views.end());
+    } else if (op == "add_dropdown_value" || op == "update_dropdown_value" || op == "delete_dropdown_value" || op == "move_dropdown_value") {
+        auto &t = table(g, j.id("table"));
+        require(t.ownerField, "Select a dropdown table.");
+        if (op == "add_dropdown_value") t.values.push_back({next++, j.str("value", 4096)});
+        else {
+            auto it = std::find_if(t.values.begin(), t.values.end(), [&](const auto &v) { return v.id == j.id("id"); });
+            require(it != t.values.end(), "Dropdown value no longer exists.");
+            if (op == "update_dropdown_value") it->value = j.str("value", 4096);
+            else if (op == "delete_dropdown_value") t.values.erase(it);
+            else {
+                const auto index = j.id("index");
+                require(index < static_cast<int>(t.values.size()), "Dropdown order is out of range.");
+                auto value = *it; t.values.erase(it); t.values.insert(t.values.begin() + index, value);
+            }
+        }
+        changesSchema = false;
     } else if (op == "add_constraint") {
         auto &t = table(g, j.id("table"));
         t.constraints.push_back({next++, j.str("name"), user_check(t, j.str("expression", 4096))});
@@ -731,6 +871,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         if (!j.type("media").empty()) f.media = j.str("media");
         if (!j.type("scale").empty()) f.scale = j.id("scale");
         table(g, j.id("table")).fields.push_back(f);
+        if (f.kind == "dropdown") create_dropdown(g, j.id("table"), f.id, next);
         if (!j.type("check").empty()) {
             auto &t = table(g, j.id("table"));
             t.fields.back().check = user_check(t, j.str("check", 4096));
@@ -755,6 +896,8 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         changesSchema = before.kind != f.kind || before.indexed != f.indexed ||
                         before.unique != f.unique || before.nullable != f.nullable ||
                         before.media != f.media || before.scale != f.scale || before.check != f.check;
+        if (f.kind == "dropdown") for (auto &e : g.edges) if (e.field == 0 && e.targetField == f.id) e.referenceName = f.name;
+        if (before.kind != "dropdown" && f.kind == "dropdown") create_dropdown(g, j.id("table"), f.id, next);
     } else if (op == "delete_field") {
         auto &t = table(g, j.id("table"));
         int id = j.id("id");
@@ -807,6 +950,7 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         }
     } else if (op == "update_connection") {
         auto &e = edge(g, j.id("id"));
+        require(!e.targetField || e.field != 0, "Dropdown relationships are managed by their owning field.");
         const auto before = e;
         if (!j.type("many").empty()) e.many = j.boolean("many");
         if (!j.type("cascade").empty()) e.cascade = j.boolean("cascade");
@@ -819,18 +963,20 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
         changesSchema = e.many != before.many || e.cascade != before.cascade;
     } else if (op == "delete_connection") {
         int id = j.id("id");
-        edge(g, id);
+        require(edge(g, id).field != 0 || edge(g, id).targetField == 0, "Delete the owning field to remove its dropdown relationship.");
         g.edges.erase(std::remove_if(g.edges.begin(), g.edges.end(), [&](auto &e) { return e.id == id; }),
                       g.edges.end());
     } else
         throw std::runtime_error("Unknown ER command.");
+    remove_orphan_dropdowns(g);
+    g.dropdownSequence = std::max(g.dropdownSequence, m.graph.dropdownSequence);
     validate(g);
     auto json = graph_json(db, g);
     require(json.size() <= 1024 * 1024, "ER model exceeds 1 MiB.");
     if (json == graph_json(db, m.graph))
         return false;
     // Label edits are still schema edits, even though stable SQL IDs need no DDL.
-    bool labels = op == "update_index" || op == "update_field" || op == "update_connection" ||
+    bool labels = op.find("dropdown_value") != std::string::npos || op == "update_index" || op == "update_field" || op == "update_connection" ||
                   (op == "update_table" && table(g, j.id("id")).name != table(m.graph, j.id("id")).name);
     require(!state.schema_locked || (!changesSchema && !labels),
             "The user schema is locked because this document has held real data.");
@@ -862,8 +1008,20 @@ bool er_command(sqlite3 *db, ERModel &m, DocumentState &state, SubCardMode mode,
     auto newState = state;
     exec(db, "SAVEPOINT subcard_er_command");
     try {
+        exec(db, "PRAGMA defer_foreign_keys=ON");
+        const auto dropdown_signature = [&](const ERGraph &graph) {
+            std::string result;
+            for (const auto &t : graph.tables) if (t.ownerField) {
+                result += num(t.id) + ":" + t.name + ":" + num(t.fields[0].id);
+                for (const auto &v : t.values) result += ":" + num(v.id) + ":" + quote(db, v.value);
+            }
+            return result;
+        };
+        const bool defaultsChanged = dropdown_signature(g) != dropdown_signature(m.graph);
+        if (defaultsChanged) store_dropdowns(db, g);
         if (changesSchema)
             newState = replace_user_schema(db, state, mode, schema(g).c_str());
+        if (!changesSchema && defaultsChanged) reset_dropdown_rows(db);
         store(db, "subcard_system_er_model", json);
         exec(db, "RELEASE subcard_er_command");
     } catch (...) {

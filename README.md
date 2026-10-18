@@ -27,10 +27,11 @@ tables: destination only for 1:N, both ends for 1:1. Pan, zoom, fit, calibrated 
 clipboard duplication and undo/redo are supported. Adding a table smoothly pans the canvas to reveal it. Diagram layout and viewport
 are saved inside the document. Mac uses a resizable inspector; iPhone uses a
 separate details screen. The inspector supports **string, URL, date, time,
-date-time, binary coded decimal (BCD), float, integer, boolean and blob fields**,
+date-time, binary coded decimal (BCD), float, integer, boolean, blob and single-selection dropdown fields**,
 with **Allow NULL** and **Unique values** rules for every field, plus optional
 lookup indexes for suitable types. SQLite enforces required and unique values.
-Fields support a custom CHECK expression, and tables support multiple named CHECK
+Dropdowns create managed choice tables whose editable, ordered defaults survive data resets
+without locking the schema. Fields support a custom CHECK expression, and tables support multiple named CHECK
 constraints, with syntax validation before acceptance and a circled-cross delete control.
 Blobs can represent
 images (such as contact photos), videos, sounds or documents. Fields appear only
@@ -111,6 +112,7 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 
 - [View column builder, aggregate choices and generated SQL](documentation/features/views.md)
 - [Editable query results: conservative analysis and future implementation reference](documentation/features/editable-query-results.md)
+- [Single-selection dropdowns, managed choice tables and persistent defaults](documentation/features/dropdown-fields.md)
 - [Typed fields, indexes, exact decimals and blob purposes](documentation/features/typed-fields.md)
 - [Field and named table CHECK constraints](documentation/features/check-constraints.md)
 - [Entity relationship canvas, command architecture, design decisions, and tests](documentation/features/entity-relationship-canvas.md)

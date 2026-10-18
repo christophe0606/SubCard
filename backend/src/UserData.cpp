@@ -39,9 +39,16 @@ std::string quote(const std::string& identifier) {
     for (char c : identifier) { result += c; if (c == '"') result += c; }
     return result + "\"";
 }
+bool dropdown_table(sqlite3* db, const char* name) {
+    if (!name || std::strncmp(name, "user_t", 6) != 0) return false;
+    if (!scalar(db, "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='subcard_system_dropdown_tables')")) return false;
+    Statement stmt(db, "SELECT 1 FROM subcard_system_dropdown_tables WHERE 'user_t'||id=?1");
+    check(sqlite3_bind_text(stmt.value, 1, name, -1, SQLITE_TRANSIENT), db);
+    return sqlite3_step(stmt.value) == SQLITE_ROW;
+}
 bool has_rows(sqlite3* db) {
     for (const auto& table : tables(db))
-        if (scalar(db, ("SELECT EXISTS(SELECT 1 FROM " + quote(table) + " LIMIT 1)").c_str())) return true;
+        if (!dropdown_table(db, table.c_str()) && scalar(db, ("SELECT EXISTS(SELECT 1 FROM " + quote(table) + " LIMIT 1)").c_str())) return true;
     return false;
 }
 void require_edit(SubCardMode mode) {
@@ -79,9 +86,11 @@ void validate_user_relationships(sqlite3* db) {
 // SQL is an internal storage boundary for future typed schema/data commands.
 // No system writes, transactions, PRAGMAs, extensions, views, virtual tables,
 // triggers, or attached databases can be smuggled through these batches.
+struct AuthorizationContext { bool schema; std::vector<std::string> dropdowns; };
 int authorize(void* context, int action, const char* first, const char* second,
               const char* database, const char* source) {
-    const bool schema = *static_cast<bool*>(context);
+    const auto &authorization = *static_cast<AuthorizationContext*>(context);
+    const bool schema = authorization.schema;
     if (source || (database && std::strcmp(database, "main") != 0)) return SQLITE_DENY;
     switch (action) {
     case SQLITE_CREATE_TABLE:
@@ -91,7 +100,7 @@ int authorize(void* context, int action, const char* first, const char* second,
     case SQLITE_CREATE_INDEX: return schema && user_name(second) && user_index_name(first) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_REINDEX: return schema && user_index_name(first) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_INSERT: case SQLITE_UPDATE: case SQLITE_DELETE:
-        return (schema ? first && std::strcmp(first, "sqlite_master") == 0 : user_name(first)) ? SQLITE_OK : SQLITE_DENY;
+        return (schema ? first && std::strcmp(first, "sqlite_master") == 0 : user_name(first) && std::find(authorization.dropdowns.begin(), authorization.dropdowns.end(), first) == authorization.dropdowns.end()) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_READ:
         return user_name(first) || (schema && first && std::strcmp(first, "sqlite_master") == 0) ? SQLITE_OK : SQLITE_DENY;
     case SQLITE_SELECT: case SQLITE_RECURSIVE: return SQLITE_OK;
@@ -106,7 +115,9 @@ void restricted_exec(sqlite3* db, const char* sql, bool schema) {
         sqlite3* db;
         ~Authorization() { sqlite3_set_authorizer(db, nullptr, nullptr); }
     } guard{db};
-    check(sqlite3_set_authorizer(db, authorize, &schema), db);
+    AuthorizationContext context{schema, {}};
+    for (const auto &t : tables(db)) if (dropdown_table(db, t.c_str())) context.dropdowns.push_back(t);
+    check(sqlite3_set_authorizer(db, authorize, &context), db);
     exec(db, sql);
 }
 void store_state(sqlite3* db, DocumentState state) {
@@ -120,8 +131,23 @@ void clear_rows(sqlite3* db) {
 }
 }
 
+void reset_dropdown_rows(sqlite3* db) {
+    Statement registry(db, "SELECT id,value_field FROM subcard_system_dropdown_tables");
+    int step;
+    while ((step = sqlite3_step(registry.value)) == SQLITE_ROW) {
+        const auto id = std::to_string(sqlite3_column_int(registry.value, 0));
+        const auto field = std::to_string(sqlite3_column_int(registry.value, 1));
+        exec(db, ("DELETE FROM user_t" + id + " WHERE id NOT IN(SELECT id FROM subcard_system_dropdown_values WHERE table_id=" + id + ")").c_str());
+        exec(db, ("INSERT INTO user_t" + id + "(id,f" + field + ") SELECT id,value FROM subcard_system_dropdown_values WHERE table_id=" + id + " ORDER BY position ON CONFLICT(id) DO UPDATE SET f" + field + "=excluded.f" + field).c_str());
+    }
+    check(step, db);
+}
+
 void initialize_document_state(sqlite3* db) {
-    exec(db, "CREATE TABLE IF NOT EXISTS subcard_system_state("
+    exec(db, "CREATE TABLE IF NOT EXISTS subcard_system_dropdown_tables(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, value_field INTEGER NOT NULL) STRICT;"
+             "CREATE TABLE IF NOT EXISTS subcard_system_dropdown_values(id INTEGER PRIMARY KEY, table_id INTEGER NOT NULL REFERENCES subcard_system_dropdown_tables(id), dropdown_name TEXT NOT NULL, value TEXT NOT NULL, position INTEGER NOT NULL, UNIQUE(table_id,position)) STRICT;"
+             "CREATE INDEX IF NOT EXISTS subcard_system_dropdown_name ON subcard_system_dropdown_values(dropdown_name,position);"
+             "CREATE TABLE IF NOT EXISTS subcard_system_state("
              "id INTEGER PRIMARY KEY CHECK(id=1),"
              "data_kind INTEGER NOT NULL CHECK(data_kind BETWEEN 0 AND 2),"
              "schema_locked INTEGER NOT NULL CHECK(schema_locked IN (0,1)),"
@@ -164,6 +190,7 @@ DocumentState replace_user_schema(sqlite3* db, DocumentState state, SubCardMode 
     restricted_exec(db, sql, true);
     validate_user_relationships(db);
     if (has_rows(db)) throw std::runtime_error("A schema definition cannot insert user data.");
+    reset_dropdown_rows(db);
     state.data_kind = SUBCARD_DATA_NONE;
     store_state(db, state);
     transaction.commit();
@@ -191,6 +218,7 @@ DocumentState discard_fake_data(sqlite3* db, DocumentState state, SubCardMode mo
     if (state.data_kind != SUBCARD_DATA_FAKE) throw std::runtime_error("This document has no fake data to discard.");
     Transaction transaction(db);
     clear_rows(db);
+    reset_dropdown_rows(db);
     state.data_kind = SUBCARD_DATA_NONE;
     store_state(db, state);
     transaction.commit();

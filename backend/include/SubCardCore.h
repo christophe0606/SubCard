@@ -53,8 +53,8 @@ int subcard_document_discard_fake_data(SubCardDocument* document);
 // Save (including Save As) is a no-op while unchanged. Failure preserves edits.
 int subcard_document_save(SubCardDocument* document, const char* path);
 
-// ER graph/viewport JSON: version 6 with data views, 5 with custom CHECKs,
-// 4 with field rules, 3 with typed fields, otherwise 2. Opens versions 1-6.
+// ER graph/viewport JSON: version 8 with managed dropdowns, 7 with named relationships, 6 with data views, 5 with custom CHECKs,
+// 4 with field rules, 3 with typed fields, otherwise 2. Opens versions 1-8.
 // Borrowed until next call/mutation.
 // Command API is shared by frontends and future scripting adapters. See the ER
 // architecture document for the command contract. View changes skip undo history.

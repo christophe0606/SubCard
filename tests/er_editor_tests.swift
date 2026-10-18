@@ -10,6 +10,7 @@ enum EditorTests {
     newTableVisibility()
     phoneTablePlacement()
     typedFields()
+    dropdownFields()
     customChecks()
     dataViews()
     tableTapNavigation()
@@ -274,6 +275,45 @@ enum EditorTests {
       "Compact single/double taps, desktop selection, use-mode selection and draft ownership passed."
     )
   }
+  static func dropdownFields() {
+    let document = subcard_document_new()!
+    defer { subcard_document_close(document) }
+    let store = ERStore()
+    store.attach(document, changed: {})
+    store.addTable()
+    let owner = store.table!.id
+    store.addField(.dropdown)
+    let field = store.field!.id
+    let managed = store.graph.tables.first { $0.ownerField == field }!
+    assert(managed.isDropdown && managed.fields[0].name == "valued")
+    assert(store.graph.edges[0].isDropdown && store.graph.edges[0].destinationTable == owner)
+    store.command("add_dropdown_value", ["table": managed.id, "value": "First"])
+    store.command("add_dropdown_value", ["table": managed.id, "value": "Second"])
+    store.select(table: managed.id)
+    assert(!store.ordinaryTableSelected && !store.removableSelection)
+    store.beginConnection()
+    store.deleteSelection()
+    assert(store.table?.id == managed.id && store.pendingSource == nil && store.error == nil)
+    store.select(edge: store.graph.edges[0].id)
+    assert(!store.removableSelection)
+    store.deleteSelection()
+    assert(store.graph.edges.count == 1)
+    store.select(table: owner)
+    store.duplicate()
+    assert(store.ordinaryTableSelected && store.table?.id != owner)
+    let clone = store.graph.tables.first { $0.ownerField == store.table!.fields[0].id }!
+    assert(clone.name == "dropdown_2" && clone.values.map(\.value) == ["First", "Second"])
+    assert(clone.values[0].id != managed.values.first?.id)
+    store.select(table: owner)
+    store.command("delete_field", ["table": owner, "id": field])
+    assert(!store.graph.tables.contains { $0.id == managed.id })
+    store.command("undo")
+    assert(store.graph.tables.first { $0.id == managed.id }?.values.count == 2)
+    assert(!store.locked && subcard_document_data_kind(document) == SUBCARD_DATA_NONE)
+    assert(store.error == nil)
+    print("Dropdown selection, managed command validation, independent copies and undo passed.")
+  }
+
   static func typedFields() {
     let document = subcard_document_new()!
     defer { subcard_document_close(document) }
@@ -281,7 +321,7 @@ enum EditorTests {
     store.attach(document, changed: {})
     store.addTable()
     let tableID = store.table!.id
-    for type in ERDatatype.allCases {
+    for type in ERDatatype.allCases where type != .dropdown {
       store.addField(type)
       assert(store.field?.kind == type.rawValue)
       assert(store.table?.height == 64)  // The canvas stays table/relationship only.

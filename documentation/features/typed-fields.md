@@ -2,7 +2,8 @@
 
 Select a table and use **Fields → Add field** in the inspector (or the details
 screen on iPhone). Supported datatypes are String, URL, Date, Time, Date-time,
-Binary coded decimal (BCD), Float, Integer, Boolean and Blob. Tap a field row to
+Binary coded decimal (BCD), Float, Integer, Boolean, Blob and
+[Dropdown (single selection)](dropdown-fields.md). Tap a field row to
 expand its controls directly underneath it; tap again to
 collapse them. Only one field is expanded at a time. Expansion is animated
 (SwiftUI respects Reduce Motion), and the SwiftUI inspector brings the expanded
@@ -51,6 +52,7 @@ core, not just to frontend controls.
 | Float (`float`) | REAL | SQLite double precision floating point | Yes |
 | Integer (`integer`) | INTEGER | Signed 64-bit integer | Yes |
 | Boolean (`boolean`) | INTEGER | 0 or 1 | Yes |
+| Dropdown (`dropdown`) | INTEGER | Choice ID in an automatically managed table | Automatic |
 | Blob (`blob`) | BLOB | Arbitrary bytes, including embedded zeros | No |
 
 Dates reject impossible/leap-day dates; times reject 24-hour values and leap
@@ -121,7 +123,8 @@ All IDs share the graph's global ID namespace. Names are validated centrally and
 must be unique within their table, including the implicit id name. Invalid
 commands are atomic and consume no IDs/history. Legacy `add_index`,
 `update_index`, `delete_index` and `connect` remain compatibility commands for
-legacy keys only; ordinary fields never become relationship destinations.
+legacy keys only. Dropdowns have managed relationships targeting their owning
+fields; other ordinary fields never become relationship destinations.
 
 Field commands require editing mode. Adding/deleting fields, changing a type,
 index, uniqueness, nullability, scale or blob purpose requires an unlocked schema

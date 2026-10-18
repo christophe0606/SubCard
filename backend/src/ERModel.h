@@ -16,9 +16,12 @@ struct ERField {
     std::string check = ""; // SQL expression referencing stable column IDs.
 };
 struct ERConstraint { int id; std::string name, expression; };
+struct ERDropdownValue { int id; std::string value; };
 struct ERTable {
     int id; std::string name, color; double x, y; std::vector<ERField> fields;
     std::vector<ERConstraint> constraints;
+    int ownerField = 0; // Managed dropdown table, owned by this field.
+    std::vector<ERDropdownValue> values = {};
 };
 // field == 0: conceptual table -> target relationship; generated target.r<ID> references table.id.
 // field != 0: legacy foreign-key edge, retained without rewriting existing data.
@@ -35,6 +38,7 @@ struct ERDataView {
 struct ERGraph {
     std::vector<ERTable> tables; std::vector<EREdge> edges;
     std::vector<ERDataView> views;
+    int dropdownSequence = 0;
 };
 struct ERChange { ERGraph before, after; bool schema; };
 struct ERModel {

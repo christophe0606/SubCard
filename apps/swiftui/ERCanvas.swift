@@ -70,6 +70,98 @@ struct ERCanvasEditor: View {
   }
 }
 
+private struct ERDropdownProperties: View {
+  @ObservedObject var store: ERStore
+  let table: ERTable
+  @State private var draft: ERDropdownDraft?
+  private var editable: Bool { store.editable && !store.locked }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Label(table.name, systemImage: "list.bullet.rectangle").font(.headline)
+      Text("Managed dropdown · single selection").font(.subheadline)
+      Text("Fixed text column: valued. Delete the owning field to remove this table.")
+        .font(.caption).foregroundStyle(.secondary)
+      Text("Default choices").font(.headline)
+      Text("These design defaults survive fake-data resets and do not lock the schema.")
+        .font(.caption).foregroundStyle(.secondary)
+      ForEach(Array(table.values.enumerated()), id: \.element.id) { index, value in
+        VStack(alignment: .leading, spacing: 8) {
+          Text(value.value.isEmpty ? "(empty text)" : value.value)
+          HStack {
+            Button("Edit") { draft = ERDropdownDraft(table: table.id, valueID: value.id, value: value.value) }
+            Button(role: .destructive) {
+              store.command("delete_dropdown_value", ["table": table.id, "id": value.id])
+            } label: { Image(systemName: "trash") }.accessibilityLabel("Delete choice")
+            Spacer()
+            Button {
+              store.command("move_dropdown_value", ["table": table.id, "id": value.id, "index": index - 1])
+            } label: { Image(systemName: "arrow.up") }.disabled(index == 0).accessibilityLabel("Move choice up")
+            Button {
+              store.command("move_dropdown_value", ["table": table.id, "id": value.id, "index": index + 1])
+            } label: { Image(systemName: "arrow.down") }.disabled(index + 1 == table.values.count).accessibilityLabel("Move choice down")
+          }.disabled(!editable)
+          Divider()
+        }
+      }
+      Button("Add choice") { draft = ERDropdownDraft(table: table.id, valueID: nil, value: "") }.disabled(!editable)
+    }
+    .sheet(item: $draft) { draft in ERDropdownValueEditor(store: store, draft: draft) }
+    .id(table.id)
+  }
+}
+
+private struct ERDropdownDraft: Identifiable {
+  let id = UUID()
+  let table: Int
+  let valueID: Int?
+  var value: String
+}
+private struct ERDropdownValueEditor: View {
+  @ObservedObject var store: ERStore
+  @State var draft: ERDropdownDraft
+  @Environment(\.dismiss) private var dismiss
+  @FocusState private var focused: Bool
+  private var title: String { draft.valueID == nil ? "Add choice" : "Edit choice" }
+  private var valid: Bool { draft.value.utf8.count <= 4096 && !draft.value.contains("\0") && store.editable && !store.locked }
+  var body: some View {
+    #if os(iOS)
+      NavigationStack {
+        Form { valueInput }.navigationTitle(title)
+          .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) { Button("Apply", action: apply).disabled(!valid) }
+          }
+      }
+      .onAppear { focused = true }
+    #else
+      VStack(alignment: .leading, spacing: 16) {
+        Text(title).font(.headline)
+        valueInput
+        HStack {
+          Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+          Spacer()
+          Button("Apply", action: apply).keyboardShortcut(.defaultAction).disabled(!valid)
+        }
+      }.padding(24).frame(width: 360)
+        .onAppear { focused = true }
+    #endif
+  }
+  private var valueInput: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("Text value").font(.caption)
+      TextField("Text value", text: $draft.value).textFieldStyle(.roundedBorder).focused($focused)
+        .onSubmit { if valid { apply() } }
+      if draft.value.utf8.count > 4096 { Text("Use at most 4096 UTF-8 bytes.").foregroundStyle(.red) }
+    }
+  }
+  private func apply() {
+    var properties: [String: Any] = ["table": draft.table, "value": draft.value]
+    if let id = draft.valueID { properties["id"] = id }
+    store.command(draft.valueID == nil ? "add_dropdown_value" : "update_dropdown_value", properties)
+    if store.error == nil { dismiss() }
+  }
+}
+
 private struct ERInspector: View {
   @ObservedObject var store: ERStore
   private enum Editing: Hashable {
@@ -92,13 +184,19 @@ private struct ERInspector: View {
             Text("Relationship").font(.headline)
             Text("From: \(store.tableName(e.sourceTable))")
             Text("To: \(store.tableName(e.destinationTable))")
+            if e.isDropdown {
+              Text("Managed dropdown · one choice per record. Delete the owning field to remove it.").font(.caption)
+            } else {
             connectionProperties(e)
             Button("Delete relationship", role: .destructive) {
               finishEditing()
               store.command("delete_connection", ["id": e.id])
             }.disabled(!schemaEditable)
+            }
           } else if let v = store.dataView {
             ERDataViewProperties(store: store, view: v)
+          } else if let t = store.table, t.isDropdown {
+            ERDropdownProperties(store: store, table: t)
           } else if let t = store.table {
             Text(t.name).font(.headline).accessibilityIdentifier("modelTableName")
             nameInput("Table name", text: $store.tableNameDraft, focus: .table)
@@ -699,7 +797,7 @@ private struct ERCanvasSurface: View {
   @State private var pinchAnchor = CGPoint.zero
   private let width = 320.0
   private var canDelete: Bool {
-    store.editable && (store.dataView != nil || (!store.locked && (store.table != nil || store.edge != nil)))
+    store.editable && (store.dataView != nil || (!store.locked && store.removableSelection))
   }
   private var scale: Double { store.viewport.zoom * store.viewport.calibration }
   private var tables: [ERTable] {
@@ -726,7 +824,7 @@ private struct ERCanvasSurface: View {
               Button("Table", systemImage: "tablecells") { store.addTable() }
                 .disabled(store.locked)
               Button("Connection", systemImage: "arrow.triangle.branch") { store.beginConnection() }
-                .disabled(store.locked || store.table == nil)
+                .disabled(store.locked || !store.ordinaryTableSelected)
               Button("View", systemImage: "rectangle.on.rectangle") { store.addDataView() }
             } label: {
               Label("Create", systemImage: "plus")
@@ -765,20 +863,19 @@ private struct ERCanvasSurface: View {
                   .disabled(!store.graph.canRedo || !store.editable)
                 Divider()
                 Button("Copy", systemImage: "doc.on.doc", action: store.copy).disabled(
-                  store.table == nil)
+                  !store.ordinaryTableSelected)
                 Button("Cut", systemImage: "scissors", action: store.cut)
-                  .disabled(store.table == nil || store.locked || !store.editable)
+                  .disabled(!store.ordinaryTableSelected || store.locked || !store.editable)
                 Button("Paste", systemImage: "doc.on.clipboard", action: store.paste)
                   .disabled(store.locked || !store.editable)
                 Button("Duplicate", systemImage: "plus.square.on.square", action: store.duplicate)
-                  .disabled(store.table == nil || store.locked || !store.editable)
+                  .disabled(!store.ordinaryTableSelected || store.locked || !store.editable)
                 Divider()
                 Button(
                   "Delete", systemImage: "trash", role: .destructive, action: store.deleteSelection
                 )
                 .disabled(
-                  (store.table == nil && store.edge == nil && store.dataView == nil)
-                    || (store.locked && store.dataView == nil) || !store.editable)
+                  !canDelete)
               } label: {
                 Label("Edit", systemImage: "ellipsis").labelStyle(.iconOnly)
               }
@@ -819,9 +916,9 @@ private struct ERCanvasSurface: View {
                 .focusable().focused($canvasFocused)
                 .onAppear { canvasFocused = true }
                 .onDeleteCommand(perform: canDelete ? { store.deleteSelection() } : nil)
-                .onCopyCommand(perform: store.table == nil ? nil : { store.clipboardProviders() })
+                .onCopyCommand(perform: !store.ordinaryTableSelected ? nil : { store.clipboardProviders() })
                 .onCutCommand(
-                  perform: store.table == nil || !store.editable || store.locked
+                  perform: !store.ordinaryTableSelected || !store.editable || store.locked
                     ? nil : { store.clipboardProviders(cutting: true) }
                 )
                 .onPasteCommand(
@@ -909,7 +1006,7 @@ private struct ERCanvasSurface: View {
   }
   private func hitPort(_ p: CGPoint, right: Bool) -> Int? {
     for t in tables.reversed() {
-      if store.graph.views.contains(where: { $0.id == t.id }) { continue }
+      if t.isDropdown || store.graph.views.contains(where: { $0.id == t.id }) { continue }
       let q = port(t, right: right)
       if hypot(p.x - q.x, p.y - q.y) < max(12, 14 / scale) { return t.id }
     }
@@ -1037,15 +1134,19 @@ private struct ERCanvasSurface: View {
       ctx.stroke(
         Path(roundedRect: rect, cornerRadius: 8 * scale),
         with: .color(selected ? .accentColor : erColor(t.color)), lineWidth: selected ? 3 : 1)
+      if t.isDropdown {
+        ctx.stroke(Path(roundedRect: rect.insetBy(dx: 5 * scale, dy: 5 * scale), cornerRadius: 5 * scale),
+                   with: .color(.white.opacity(0.65)), style: StrokeStyle(lineWidth: scale, dash: [4 * scale, 3 * scale]))
+      }
       // Clip long names to the rectangle without changing the 100% type size.
       var title = ctx
       title.clip(
         to: Path(
           CGRect(x: p.x + 16 * scale, y: p.y, width: (width - 26) * scale, height: 60 * scale)))
       title.draw(
-        Text(t.name).font(.system(size: 72 / 2.54 * scale, weight: .semibold)).foregroundColor(
+        Text((t.isDropdown ? "▾ " : "") + t.name).font(.system(size: 72 / 2.54 * scale, weight: .semibold)).foregroundColor(
           .white), at: CGPoint(x: p.x + 16 * scale, y: p.y + 30 * scale), anchor: .leading)
-      if !store.graph.views.contains(where: { $0.id == t.id }) {
+      if !t.isDropdown && !store.graph.views.contains(where: { $0.id == t.id }) {
         circle(&ctx, port(t, right: false), selected: false)
         circle(&ctx, port(t, right: true), selected: store.pendingSource == t.id)
       }
@@ -1327,14 +1428,14 @@ private struct ERScrollbar: View {
         Divider()
         Button("Duplicate") { store?.duplicate() }
           .keyboardShortcut("d", modifiers: .command)
-          .disabled(!schemaEditable || store?.table == nil)
+          .disabled(!schemaEditable || store?.ordinaryTableSelected != true)
 
       }
       CommandMenu("Model") {
         Menu("Create") {
           Button("Table") { store?.addTable() }
             .keyboardShortcut("t", modifiers: [.command, .shift]).disabled(!schemaEditable)
-          Button("Connection") { store?.beginConnection() }.disabled(!schemaEditable || store?.table == nil)
+          Button("Connection") { store?.beginConnection() }.disabled(!schemaEditable || store?.ordinaryTableSelected != true)
           Button("View") { store?.addDataView() }.disabled(store?.editable != true)
         }
       }

@@ -188,3 +188,11 @@ real-data fixture opens in use mode with the schema locked. Returning to editing
 preserves the lock in both apps. The iPhone binary still targets iOS 16.0 and has
 only system runtime dependencies. Linux/Windows and physical-iPhone runtime
 interactions were not validated for this change.
+
+## Dropdown defaults
+
+[Managed dropdown choices](dropdown-fields.md) are design defaults. They do not
+count toward fake/real provenance or lock the schema. System templates repopulate
+their user tables after schema replacement and fake-data discard. Direct user-data
+writes cannot modify these managed tables. Real ordinary data locks their design
+under the same permanent schema-lock policy as other field definitions.
