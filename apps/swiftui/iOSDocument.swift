@@ -52,6 +52,8 @@ final class PhoneDocumentStore: ObservableObject {
     enum Intent { case new, open, openURL(URL) }
     @Published private(set) var text: String
     @Published private(set) var changed = false
+    @Published private(set) var usingDocument = false
+    @Published private(set) var schemaLocked = false
     @Published private(set) var url: URL?
     @Published var error: String?
     @Published var importing = false
@@ -76,11 +78,20 @@ final class PhoneDocumentStore: ObservableObject {
     private func refresh() {
         text = String(cString: subcard_document_text(owner.pointer))
         changed = subcard_document_is_changed(owner.pointer) != 0
+        usingDocument = subcard_document_mode(owner.pointer) == SUBCARD_MODE_USE
+        schemaLocked = subcard_document_schema_is_locked(owner.pointer) != 0
     }
 
     func setText(_ text: String) {
         guard !text.utf8.contains(0) else { return }
         if subcard_document_set_text(owner.pointer, text) == 0 { error = DocumentFailure.core().message }
+        refresh()
+    }
+
+    func toggleMode() {
+        if subcard_document_set_mode(owner.pointer, usingDocument ? SUBCARD_MODE_EDIT : SUBCARD_MODE_USE) == 0 {
+            error = DocumentFailure.core().message
+        }
         refresh()
     }
 
@@ -235,14 +246,37 @@ struct PhoneDocumentView: View {
                 Text(store.name).font(.title2).bold().lineLimit(2)
                 Text(store.changed ? "Edited" : "No unsaved changes")
                     .font(.subheadline).foregroundStyle(.secondary)
-                Text("Document text").font(.headline)
+                DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
+                    .disabled(store.busy)
+                HStack {
+                    Text("Document text").font(.headline)
+                    Spacer()
+                    Button {
+                        editing.toggle()
+                    } label: {
+                        Label(editing ? "Done" : "Edit text", systemImage: editing ? "checkmark" : "square.and.pencil")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(store.busy)
+                }
+                Text("Tap the text below to edit it.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 TextEditor(text: Binding(get: { store.text }, set: { store.setText($0) }))
+                    .font(.title3)
                     .focused($editing)
+                    .scrollContentBackground(.hidden)
                     .padding(8)
-                    .background(.background)
+                    .frame(minHeight: 120)
+                    .background(Color(uiColor: .secondarySystemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(editing ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: editing ? 2 : 1)
+                            .allowsHitTesting(false)
+                    }
                     .accessibilityLabel("Document text")
+                    .accessibilityHint("Editable text. Double-tap to start editing.")
                     .disabled(store.busy)
             }
             .padding()

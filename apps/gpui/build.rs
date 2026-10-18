@@ -14,6 +14,14 @@ fn main() {
         backend.join("src/Document.cpp").display()
     );
     println!("cargo:rerun-if-changed={}", sqlite.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/UserData.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend.join("src/UserData.h").display()
+    );
 
     cc::Build::new()
         .cpp(true)
@@ -22,6 +30,7 @@ fn main() {
         .include(sqlite.join("include"))
         .file(source)
         .file(backend.join("src/Document.cpp"))
+        .file(backend.join("src/UserData.cpp"))
         .warnings(true)
         .compile("subcard_core");
 

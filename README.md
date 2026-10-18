@@ -18,6 +18,15 @@ verified. On-device editor and file-provider interactions still need testing.
 The current editor is a small document-text field initialized with **Hello World**
 from C++. Full card editing and scripting are future work.
 
+Each document separates application-owned system tables from its user-defined
+entity/relationship schema. User data has one global state across **all user
+tables**: none, fake, or real. Empty/fake documents open in editing mode; documents
+with real data open in use mode and can return to editing. The first real data
+permanently locks the user schema: version 1 has no schema migration. Fake data
+can be discarded to change its schema. The shared core enforces these rules;
+the current interfaces provide basic mode controls while detailed mode-specific
+workflows remain future work.
+
 ## Architecture overview
 
 ```text
@@ -74,6 +83,7 @@ You can export `SUBCARD_IPHONE_UDID` instead of passing `--device` each time.
 ## Documentation
 
 - [Architecture and principles](documentation/architecture.md)
+- [Document lifecycle, global data states, modes, and schema locking](documentation/features/document-lifecycle.md)
 - [Development, prerequisites, build storage, and platform scope](documentation/development.md)
 - [Hello World feature and verification](documentation/features/hello-world.md)
 - [SQLite documents, menus, shortcuts, format, and verification](documentation/features/documents.md)

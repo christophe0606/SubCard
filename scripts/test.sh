@@ -9,9 +9,17 @@ mkdir -p "$SUBCARD_BUILD/tests"
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I "$SUBCARD_ROOT/backend/include" \
     -I "$SUBCARD_ROOT/vendor/sqlite/include" \
     "$SUBCARD_ROOT/tests/document_tests.cpp" "$SUBCARD_ROOT/backend/src/Document.cpp" \
+    "$SUBCARD_ROOT/backend/src/UserData.cpp" \
     "$SUBCARD_ROOT/backend/src/SubCardCore.cpp" "$SUBCARD_BUILD/tests/sqlite3.o" \
     -pthread -lm -o "$SUBCARD_BUILD/tests/document-tests"
 "$SUBCARD_BUILD/tests/document-tests" "$SUBCARD_BUILD/tests/documents"
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I "$SUBCARD_ROOT/backend/include" \
+    -I "$SUBCARD_ROOT/vendor/sqlite/include" \
+    "$SUBCARD_ROOT/tests/document_architecture_tests.cpp" \
+    "$SUBCARD_ROOT/backend/src/Document.cpp" "$SUBCARD_ROOT/backend/src/UserData.cpp" \
+    "$SUBCARD_ROOT/backend/src/SubCardCore.cpp" "$SUBCARD_BUILD/tests/sqlite3.o" \
+    -pthread -lm -o "$SUBCARD_BUILD/tests/document-architecture-tests"
+"$SUBCARD_BUILD/tests/document-architecture-tests" "$SUBCARD_BUILD/tests/architecture"
 if [[ "$(uname -s)" == Darwin ]]; then
     for variant in swiftui gpui; do
         executable="$SUBCARD_BUILD/apps/$variant/SubCard.app/Contents/MacOS/SubCard"

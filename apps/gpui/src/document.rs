@@ -14,6 +14,9 @@ unsafe extern "C" {
     fn subcard_document_is_changed(doc: *mut c_void) -> c_int;
     fn subcard_document_set_text(doc: *mut c_void, text: *const c_char) -> c_int;
     fn subcard_document_save(doc: *mut c_void, path: *const c_char) -> c_int;
+    fn subcard_document_mode(doc: *mut c_void) -> c_int;
+    fn subcard_document_schema_is_locked(doc: *mut c_void) -> c_int;
+    fn subcard_document_set_mode(doc: *mut c_void, mode: c_int) -> c_int;
     fn subcard_last_error() -> *const c_char;
 }
 
@@ -58,6 +61,20 @@ impl Document {
     }
     pub fn changed(&self) -> bool {
         unsafe { subcard_document_is_changed(self.0.as_ptr()) != 0 }
+    }
+    pub fn using_document(&self) -> bool {
+        unsafe { subcard_document_mode(self.0.as_ptr()) == 1 }
+    }
+    pub fn schema_locked(&self) -> bool {
+        unsafe { subcard_document_schema_is_locked(self.0.as_ptr()) != 0 }
+    }
+    pub fn toggle_mode(&mut self) -> Result<(), String> {
+        let next = if self.using_document() { 0 } else { 1 };
+        if unsafe { subcard_document_set_mode(self.0.as_ptr(), next) } == 0 {
+            Err(error())
+        } else {
+            Ok(())
+        }
     }
     pub fn set_text(&mut self, text: &str) -> Result<(), String> {
         let text = CString::new(text).map_err(|_| "Text cannot contain a null character.")?;

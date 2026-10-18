@@ -2,6 +2,24 @@
 import SubCardCore
 import SwiftUI
 
+// Temporary controls for the shared session mode; full mode-specific views
+// will be designed with the card editor and use-mode workflows.
+struct DocumentModeControls: View {
+    let usingDocument: Bool
+    let schemaLocked: Bool
+    let toggle: () -> Void
+    var body: some View {
+        HStack {
+            Text(usingDocument ? "Use mode" : "Editing mode")
+            Spacer()
+            Button(usingDocument ? "Edit document" : "Use document", action: toggle)
+        }
+        if schemaLocked {
+            Text("User schema locked").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 #if os(macOS)
 import AppKit
 import UniformTypeIdentifiers
@@ -14,6 +32,8 @@ extension UTType {
 final class DocumentStore: ObservableObject {
     @Published private(set) var text = ""
     @Published private(set) var changed = false
+    @Published private(set) var usingDocument = false
+    @Published private(set) var schemaLocked = false
     @Published private(set) var url: URL?
     private var owner: CoreDocument
     private var document: OpaquePointer { owner.pointer }
@@ -31,6 +51,8 @@ final class DocumentStore: ObservableObject {
     private func refresh() {
         text = String(cString: subcard_document_text(document))
         changed = subcard_document_is_changed(document) != 0
+        usingDocument = subcard_document_mode(document) == SUBCARD_MODE_USE
+        schemaLocked = subcard_document_schema_is_locked(document) != 0
         let path = String(cString: subcard_document_path(document))
         url = path.isEmpty ? nil : URL(fileURLWithPath: path)
         window?.title = "\(name) — SubCard"
@@ -49,6 +71,11 @@ final class DocumentStore: ObservableObject {
     func setText(_ text: String) {
         guard !text.utf8.contains(0) else { return }
         if subcard_document_set_text(document, text) == 0 { reportError() }
+        refresh()
+    }
+
+    func toggleMode() {
+        if subcard_document_set_mode(document, usingDocument ? SUBCARD_MODE_EDIT : SUBCARD_MODE_USE) == 0 { reportError() }
         refresh()
     }
 
@@ -213,6 +240,7 @@ struct SubCardApp: App {
             VStack(alignment: .leading, spacing: 16) {
                 Text(store.name).font(.title)
                 Text(store.changed ? "Edited" : "No unsaved changes").foregroundStyle(.secondary)
+                DocumentModeControls(usingDocument: store.usingDocument, schemaLocked: store.schemaLocked, toggle: store.toggleMode)
                 Text("Document text")
                 TextField("Document text", text: Binding(get: { store.text }, set: { store.setText($0) }))
                     // The native rounded style fixes the control height at a

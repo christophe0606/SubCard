@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "SubCardCore.h"
 #include "sqlite3.h"
+#include "UserData.h"
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -30,6 +31,7 @@ void open(Database& db, const char* path, int flags) {
     sqlite3_busy_timeout(db.handle, 500);
     sqlite3_db_config(db.handle, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
     sqlite3_db_config(db.handle, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
+    check(sqlite3_exec(db.handle, "PRAGMA foreign_keys=ON", nullptr, nullptr, nullptr), db.handle);
 }
 bool valid_utf8(const std::string& text) {
     size_t i = 0;
@@ -90,6 +92,7 @@ void validate(sqlite3* db) {
         std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt.handle, 0))) != "ok")
         throw std::runtime_error("The document database is damaged.");
     read_text(db);
+    subcard::read_document_state(db);
 }
 void backup(sqlite3* destination, sqlite3* source) {
     auto* operation = sqlite3_backup_init(destination, "main", source, "main");
@@ -119,12 +122,17 @@ struct SubCardDocument {
     std::string text;
     std::string saved_text;
     std::string path;
+    subcard::DocumentState state;
+    SubCardMode mode = SUBCARD_MODE_EDIT;
+    std::uint64_t revision = 0;
+    std::uint64_t saved_revision = 0;
 };
 
 struct SubCardSnapshot {
     std::uint64_t document_id;
     std::string text;
     std::vector<unsigned char> bytes;
+    std::uint64_t revision;
 };
 
 SubCardDocument* subcard_document_new(void) {
@@ -137,6 +145,7 @@ SubCardDocument* subcard_document_new(void) {
         Statement stmt(doc->database.handle, "INSERT INTO document VALUES(1, ?)");
         check(sqlite3_bind_text(stmt.handle, 1, subcard_greeting(), -1, SQLITE_STATIC), doc->database.handle);
         check(sqlite3_step(stmt.handle), doc->database.handle);
+        subcard::initialize_document_state(doc->database.handle);
         doc->text = doc->saved_text = subcard_greeting();
         return doc.release();
     });
@@ -150,6 +159,9 @@ SubCardDocument* subcard_document_open(const char* path) {
         validate(source.handle);
         open(doc->database, ":memory:", SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
         backup(doc->database.handle, source.handle);
+        doc->state = subcard::read_document_state(doc->database.handle);
+        subcard::initialize_document_state(doc->database.handle);
+        doc->mode = doc->state.data_kind == SUBCARD_DATA_REAL ? SUBCARD_MODE_USE : SUBCARD_MODE_EDIT;
         doc->text = doc->saved_text = read_text(doc->database.handle);
         return doc.release();
     });
@@ -157,7 +169,9 @@ SubCardDocument* subcard_document_open(const char* path) {
 void subcard_document_close(SubCardDocument* doc) { delete doc; }
 const char* subcard_document_text(const SubCardDocument* doc) { return doc ? doc->text.c_str() : ""; }
 const char* subcard_document_path(const SubCardDocument* doc) { return doc ? doc->path.c_str() : ""; }
-int subcard_document_is_changed(const SubCardDocument* doc) { return doc && doc->text != doc->saved_text; }
+int subcard_document_is_changed(const SubCardDocument* doc) {
+    return doc && (doc->text != doc->saved_text || doc->revision != doc->saved_revision);
+}
 int subcard_document_set_text(SubCardDocument* doc, const char* text) {
     return protect(0, [=] {
         if (!doc || !text) throw std::runtime_error("Invalid document or text.");
@@ -188,6 +202,7 @@ int subcard_document_save(SubCardDocument* doc, const char* path) {
         backup(destination.handle, doc->database.handle);
         doc->path.swap(destination_path);
         doc->saved_text.swap(saved_text);
+        doc->saved_revision = doc->revision;
         return 1;
     });
 }
@@ -200,6 +215,7 @@ SubCardSnapshot* subcard_document_snapshot(const SubCardDocument* doc) {
         auto snapshot = std::make_unique<SubCardSnapshot>();
         snapshot->document_id = doc->id;
         snapshot->text = doc->text;
+        snapshot->revision = doc->revision;
         sqlite3_int64 size = 0;
         std::unique_ptr<unsigned char, decltype(&sqlite3_free)> bytes(
             sqlite3_serialize(doc->database.handle, "main", &size, 0), sqlite3_free);
@@ -223,6 +239,47 @@ int subcard_document_accept_snapshot(SubCardDocument* doc, const SubCardSnapshot
         auto baseline = snapshot->text;
         doc->path.swap(destination);
         doc->saved_text.swap(baseline);
+        doc->saved_revision = snapshot->revision;
+        return 1;
+    });
+}
+
+SubCardDataKind subcard_document_data_kind(const SubCardDocument* doc) {
+    return doc ? doc->state.data_kind : SUBCARD_DATA_NONE;
+}
+SubCardMode subcard_document_mode(const SubCardDocument* doc) {
+    return doc ? doc->mode : SUBCARD_MODE_EDIT;
+}
+int subcard_document_schema_is_locked(const SubCardDocument* doc) { return doc && doc->state.schema_locked; }
+int subcard_document_set_mode(SubCardDocument* doc, SubCardMode mode) {
+    return protect(0, [=] {
+        if (!doc || (mode != SUBCARD_MODE_EDIT && mode != SUBCARD_MODE_USE))
+            throw std::runtime_error("Invalid document or mode.");
+        doc->mode = mode;
+        return 1;
+    });
+}
+int subcard_document_replace_user_schema(SubCardDocument* doc, const char* sql) {
+    return protect(0, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        doc->state = subcard::replace_user_schema(doc->database.handle, doc->state, doc->mode, sql);
+        ++doc->revision;
+        return 1;
+    });
+}
+int subcard_document_write_user_data(SubCardDocument* doc, SubCardDataKind kind, const char* sql) {
+    return protect(0, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        doc->state = subcard::write_user_data(doc->database.handle, doc->state, doc->mode, kind, sql);
+        ++doc->revision;
+        return 1;
+    });
+}
+int subcard_document_discard_fake_data(SubCardDocument* doc) {
+    return protect(0, [=] {
+        if (!doc) throw std::runtime_error("Invalid document.");
+        doc->state = subcard::discard_fake_data(doc->database.handle, doc->state, doc->mode);
+        ++doc->revision;
         return 1;
     });
 }

@@ -23,13 +23,16 @@ handle in an owner with `Drop`; Swift keeps its owner within the main actor.
 The iPhone target reuses the root Swift package's `SubCardCore` product. Immutable
 full-database snapshots allow platform-managed Files writes without clearing the
 shared dirty state until a write succeeds. The snapshot stores the source
-document identity and saved text baseline; later edits remain unsaved. See the
-[iPhone application](features/iphone.md) for the ownership and save sequence.
+document identity, saved text baseline, and schema/data revision; later edits
+remain unsaved. See the [iPhone application](features/iphone.md) for the ownership
+and save sequence.
 
 ## SQLite document layer (2026-10-17)
 
-`backend/src/Document.cpp` owns the document schema, text mutations, format
-validation, dirty tracking, and save semantics. An in-memory SQLite working copy
+`backend/src/Document.cpp` owns system text mutations, format validation, session
+mode, dirty tracking, and save semantics. `backend/src/UserData.cpp` owns user
+schema/data transactions and the persistent lifecycle policy. An in-memory SQLite
+working copy
 separates editing from explicit saves. SQLite's backup API transfers the entire
 database, including resources and additional tables. The UIs own panels, menus,
 window titles, and confirmation flows, not persistence logic.
@@ -39,9 +42,32 @@ library by both build systems. There is no external database service or SQLite
 runtime installation. See [SQLite documents](features/documents.md) for format,
 ownership rules, keyboard conventions, verification, and current limitations.
 
+## Document lifecycle and application flow (2026-10-18)
+
+A stack's database contains application-owned system tables and document-specific
+user tables representing its entity/relationship schema. The global user-data
+state is **None**, **Fake**, or **Real**, exclusively, for all user tables together.
+System content, including the prototype text field, never counts as user data.
+
+New documents start in editing mode. Opening a document with no user data or fake
+data selects editing mode; real data selects use mode. Use mode can return to
+editing mode. Mode is transient session state, while data provenance and the
+schema lock persist with the document.
+
+The first real data permanently locks the user schema because version 1 has no
+user-schema migration. Returning to editing mode or deleting all real rows does
+not lift that lock. Fake data can be discarded so its schema can be replaced.
+All schema/data mutations pass through the shared backend's transactional policy
+boundary rather than relying on UI controls for enforcement.
+
+The [document lifecycle contract](features/document-lifecycle.md) specifies the
+global states, mode transitions, storage primitives, compatibility defaults,
+tests, and deferred design decisions. Detailed mode behavior and presentation,
+ER editing, and record-entry workflows will be designed in later steps.
+
 ## Principles to preserve
 
-- Put shared application logic and future SQLite stack storage in C++, so the
+- Put shared application logic and SQLite stack storage in C++, so the
   SwiftUI and GPUI frontends use the same behavior and document format.
 - Keep platform UI concerns in the frontend; keep platform SDKs out of the core.
 - Keep the C ABI explicit about ownership, encoding, lifetimes, and errors when

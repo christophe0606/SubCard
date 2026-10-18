@@ -349,6 +349,38 @@ impl Render for SubCardView {
                     .p_8()
                     .gap_4()
                     .child(div().text_size(px(24.)).child(name))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_4()
+                            .child(if self.document.using_document() {
+                                "Use mode"
+                            } else {
+                                "Editing mode"
+                            })
+                            .child(
+                                div()
+                                    .id("document-mode")
+                                    .child(if self.document.using_document() {
+                                        "Edit document"
+                                    } else {
+                                        "Use document"
+                                    })
+                                    .text_color(rgb(0x0066cc))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        if !this.busy {
+                                            if let Err(error) = this.document.toggle_mode() {
+                                                this.show_error(error, w, cx);
+                                            }
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    )
+                    .when(self.document.schema_locked(), |el| {
+                        el.child(div().text_color(rgb(0x606060)).child("User schema locked"))
+                    })
                     .child(div().text_color(rgb(0x606060)).child(if dirty {
                         "Edited"
                     } else {

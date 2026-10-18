@@ -47,6 +47,17 @@ It also refuses to overwrite an unrelated existing database. SQLite's DELETE
 journal is transient during a save; no WAL or journal needs to accompany a
 successfully closed document. Save errors preserve the dirty state.
 
+The `document` table is system-owned prototype content. The format now also has
+a `subcard_system_state` singleton for the **global** user-data kind and permanent
+user-schema lock, plus document-specific `user_` tables when a user schema is
+defined. Original text-only files receive empty/unlocked defaults in memory.
+See the [document lifecycle contract](document-lifecycle.md) for the extended
+system schema, exclusive data states, opening mode, and command boundary.
+
+The text-only dirty behavior above is retained. Successful user schema/data
+commands also mark the document changed; reverting text does not discard those
+changes. Full-database snapshots track their schema/data revision as well as text.
+
 SQLite 3.54.1 is vendored as unmodified amalgamation source and header, verified
 against the upstream SHA3-256 archive checksum. SwiftPM and Cargo each compile
 that same C source into a static library. Neither frontend links a system SQLite

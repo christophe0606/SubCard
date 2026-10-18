@@ -23,6 +23,32 @@ const char* subcard_document_text(const SubCardDocument* document);
 const char* subcard_document_path(const SubCardDocument* document);
 int subcard_document_is_changed(const SubCardDocument* document);
 int subcard_document_set_text(SubCardDocument* document, const char* text);
+
+// Data provenance is GLOBAL across ALL user tables, never per table or row.
+// Persistent provenance and schema lock are independent of session mode.
+typedef enum SubCardDataKind {
+    SUBCARD_DATA_NONE = 0, SUBCARD_DATA_FAKE = 1, SUBCARD_DATA_REAL = 2
+} SubCardDataKind;
+typedef enum SubCardMode {
+    SUBCARD_MODE_EDIT = 0, SUBCARD_MODE_USE = 1
+} SubCardMode;
+SubCardDataKind subcard_document_data_kind(const SubCardDocument* document);
+SubCardMode subcard_document_mode(const SubCardDocument* document);
+int subcard_document_schema_is_locked(const SubCardDocument* document);
+// Switching modes is transient, never unlocks the schema or marks a file changed.
+int subcard_document_set_mode(SubCardDocument* document, SubCardMode mode);
+// Storage primitives for a future ER editor/data layer, not end-user SQL tools.
+// Replace the complete user schema in editing mode. Only CREATE TABLE/INDEX in
+// the user_ namespace is supported. Empty SQL clears it. Fake rows are discarded
+// atomically; a document that has ever held real rows rejects all replacements.
+int subcard_document_replace_user_schema(SubCardDocument* document, const char* sql);
+// A batch of INSERT/UPDATE/DELETE statements on user_ tables. kind must be FAKE
+// or REAL. Existing fake/real rows cannot be mixed or relabeled. Fake writes
+// require editing mode and an unlocked schema. First real rows lock the schema.
+// Deleting the last row yields NONE but retains any historical schema lock.
+int subcard_document_write_user_data(SubCardDocument* document, SubCardDataKind kind, const char* sql);
+// Explicitly discard fake data before entering real data. Never deletes real rows.
+int subcard_document_discard_fake_data(SubCardDocument* document);
 // NULL path means save to the current path. A new document needs a path.
 // Save (including Save As) is a no-op while unchanged. Failure preserves edits.
 int subcard_document_save(SubCardDocument* document, const char* path);

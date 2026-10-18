@@ -16,6 +16,12 @@ documents and destinations; security-scoped URLs and file coordination handle
 access through file providers. The app registers the `.subcard` type and supports
 Open In. File-provider interaction has been compiled, not yet tested on a phone.
 
+The text editor has a contrasting system background, a visible rounded border,
+larger text, and a “Tap the text below to edit it” hint. An explicit **Edit text**
+button focuses the editor and opens the keyboard; it becomes **Done** while
+editing. The border uses the accent color while focused. These iPhone-only
+affordances make the prototype text clearly editable in light and dark mode.
+
 ## Project and build
 
 `apps/iphone/SubCard.xcodeproj` is a checked-in Xcode application project. Its
